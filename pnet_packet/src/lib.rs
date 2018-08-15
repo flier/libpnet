@@ -14,6 +14,7 @@ extern crate pnet_base;
 extern crate pnet_macros_support;
 #[macro_use]
 extern crate pnet_derive;
+extern crate byteorder;
 
 pub use pnet_macros_support::packet::*;
 
