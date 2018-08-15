@@ -1,8 +1,9 @@
 #![crate_type = "proc-macro"]
 #![recursion_limit = "128"]
 
+#[macro_use]
+extern crate failure;
 extern crate proc_macro;
-
 extern crate proc_macro2;
 #[macro_use]
 extern crate quote;
@@ -11,43 +12,64 @@ extern crate itertools;
 extern crate regex;
 extern crate syn;
 
+use std::error::Error as StdError;
 use std::fmt;
+use std::result::Result as StdResult;
 
 use byteorder::NativeEndian;
+use failure::Error;
 use proc_macro2::Span;
 use quote::{ToTokens, TokenStreamExt};
 use regex::Regex;
 
+type Result<T> = StdResult<T, Error>;
+
 /// Derives `Packet` with internal attributes.
 #[proc_macro_derive(Packet, attributes(payload, construct_with, length, length_fn))]
 pub fn packet(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let ast: syn::DeriveInput = syn::parse(input).unwrap();
-    let name = ast.ident;
-
-    match ast.vis {
-        syn::Visibility::Public(_) => {}
-        _ => panic!("#[packet] structs/enums {} must be public", name),
-    }
-
-    let mut ts = proc_macro2::TokenStream::new();
-
-    match ast.data {
-        syn::Data::Struct(s) => ts.append_all(&[make_packet(name, s.fields)]),
-        syn::Data::Enum(e) => ts.append_all(
-            e.variants
-                .into_iter()
-                .map(|v| make_packet(v.ident, v.fields)),
-        ),
-        syn::Data::Union(_) => unimplemented!(),
-    };
-
-    ts.into()
+    syn::parse(input)
+        .map_err(|err| err.into())
+        .and_then(|input| make_packets(input))
+        .map(|packets| {
+            let mut ts = proc_macro2::TokenStream::new();
+            ts.append_all(packets);
+            ts
+        })
+        .unwrap_or_else(compile_error)
+        .into()
 }
 
-fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Packet {
+fn compile_error(err: Error) -> proc_macro2::TokenStream {
+    let message = format!("err {}\n{}", err, err.backtrace());
+
+    quote! {
+        compile_error!(#message);
+    }
+}
+
+fn make_packets(input: syn::DeriveInput) -> Result<Vec<Packet>> {
+    let name = input.ident;
+
+    match input.vis {
+        syn::Visibility::Public(_) => {}
+        _ => bail!("#[packet] structs/enums {} must be public", name),
+    }
+
+    match input.data {
+        syn::Data::Struct(s) => make_packet(name, s.fields).map(|packet| vec![packet]),
+        syn::Data::Enum(e) => e
+            .variants
+            .into_iter()
+            .map(|v| make_packet(v.ident, v.fields))
+            .collect(),
+        syn::Data::Union(_) => unimplemented!(),
+    }
+}
+
+fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Result<Packet> {
     let packet_fields = match fields {
         syn::Fields::Named(fields) => fields,
-        _ => panic!("{} all fields in a packet must be named", ident),
+        _ => bail!("{} all fields in a packet must be named", ident),
     };
 
     let mut fields = vec![];
@@ -61,8 +83,12 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Packet {
         for attr in field.attrs {
             match attr.interpret_meta() {
                 Some(syn::Meta::Word(ref ident)) if ident == "payload" => {
-                    is_payload = true;
+                    if has_payload {
+                        bail!("packet may not have multiple payloads")
+                    }
+
                     has_payload = true;
+                    is_payload = true;
                 }
                 Some(syn::Meta::List(syn::MetaList {
                     ref ident,
@@ -71,15 +97,16 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Packet {
                 })) if ident == "construct_with" =>
                 {
                     if nested.is_empty() {
-                        panic!("#[construct_with] must have at least one argument")
+                        bail!("#[construct_with] must have at least one argument")
                     }
 
-                    construct_with.extend(nested.into_iter().map(|meta| match meta {
-                        syn::NestedMeta::Meta(syn::Meta::Word(ident)) => ident.clone(),
-                        _ => panic!(
-                            "#[construct_with] should be of the form #[construct_with(<types>)]"
-                        ),
-                    }))
+                    for meta in nested {
+                        if let syn::NestedMeta::Meta(syn::Meta::Word(ident)) = meta {
+                            construct_with.push(ident.clone())
+                        } else {
+                            bail!("#[construct_with] should be of the form #[construct_with(<types>)]")
+                        }
+                    }
                 }
                 Some(syn::Meta::NameValue(syn::MetaNameValue {
                     ref ident, ref lit, ..
@@ -88,7 +115,7 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Packet {
                     match lit {
                         syn::Lit::Str(lit) => packet_length = Some(lit.value()),
                         syn::Lit::Int(lit) => packet_length = Some(lit.value().to_string()),
-                        _ => panic!("expected attribute to be a string `{} = \"...\"`", ident),
+                        _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     }
                 }
                 Some(syn::Meta::NameValue(syn::MetaNameValue {
@@ -99,10 +126,10 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Packet {
                         syn::Lit::Str(lit) => {
                             packet_length = Some(lit.value() + "(&_self.to_immutable())")
                         }
-                        _ => panic!("expected attribute to be a string `{} = \"...\"`", ident),
+                        _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     }
                 }
-                _ => panic!("unknown attribute {}", attr.into_token_stream()),
+                _ => bail!("unknown attribute {}", attr.into_token_stream()),
             }
         }
 
@@ -119,10 +146,10 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Packet {
     }
 
     if !has_payload {
-        panic!("#[packet]'s must contain a payload")
+        bail!("#[packet]'s must contain a payload")
     }
 
-    Packet { ident, fields }
+    Ok(Packet { ident, fields })
 }
 
 struct Packet {
