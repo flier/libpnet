@@ -157,321 +157,261 @@ struct Packet {
     fields: Vec<Field>,
 }
 
-impl Packet {}
+impl Packet {
+    fn base_name(&self) -> &syn::Ident {
+        &self.ident
+    }
+
+    fn immutable_packet_name(&self) -> syn::Ident {
+        syn::Ident::new(&format!("{}Packet", self.base_name()), Span::call_site())
+    }
+
+    fn mutable_packet_name(&self) -> syn::Ident {
+        syn::Ident::new(
+            &format!("Mutable{}Packet", self.base_name()),
+            Span::call_site(),
+        )
+    }
+
+    fn packet_name(&self, mutable: bool) -> syn::Ident {
+        if mutable {
+            self.mutable_packet_name()
+        } else {
+            self.immutable_packet_name()
+        }
+    }
+
+    fn packet_data(&self, mutable: bool) -> syn::Ident {
+        syn::Ident::new(
+            if mutable {
+                "MutPacketData"
+            } else {
+                "PacketData"
+            },
+            Span::call_site(),
+        )
+    }
+
+    fn generate_packet(&self) -> proc_macro2::TokenStream {
+        quote!{}
+    }
+
+    fn generate_packet_struct(&self, mutable: bool) -> proc_macro2::TokenStream {
+        let packet_name = self.packet_name(mutable);
+        let packet_data = self.packet_data(mutable);
+
+        quote! {
+            /// A structure enabling manipulation of on the wire packets
+            #[derive(PartialEq)]
+            pub struct #packet_name<'p> {
+                packet: ::pnet_macros_support::packet:: #packet_data<'p>,
+            }
+        }
+    }
+
+    fn generate_constructor_new(&self, mutable: bool) -> proc_macro2::TokenStream {
+        let packet_name = self.packet_name(mutable);
+        let packet_data = self.packet_data(mutable);
+
+        let comment = format!(
+            "Constructs a new {}.
+If the provided buffer is less than the minimum required packet size, this will return None.",
+            packet_name
+        );
+        let mut_ = if mutable {
+            Some(syn::Ident::new("mut", Span::call_site()))
+        } else {
+            None
+        };
+
+        quote! {
+            #[doc = #comment]
+            #[inline]
+            pub fn new<'p>(packet: &'p #mut_ [u8]) -> Option<#packet_name<'p>> {
+                if packet.len() >= #packet_name::minimum_packet_size() {
+                    use ::pnet_macros_support::packet:: #packet_data;
+                    Some(#packet_name { packet: #packet_data::Borrowed(packet) })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn generate_constructor_owned(&self, mutable: bool) -> proc_macro2::TokenStream {
+        let packet_name = self.packet_name(mutable);
+        let packet_data = self.packet_data(mutable);
+
+        let comment = format!(
+            "Constructs a new {0}.
+If the provided buffer is less than the minimum required packet size,
+this will return None. With this constructor the {0} will own its own data
+and the underlying buffer will be dropped when the {0} is.",
+            packet_name
+        );
+
+        quote! {
+            #[doc = #comment]
+            pub fn owned(packet: Vec<u8>) -> Option<#packet_name<'static>> {
+                if packet.len() >= #packet_name::minimum_packet_size() {
+                    use ::pnet_macros_support::packet::#packet_data;
+                    Some(#packet_name { packet: #packet_data::Owned(packet) })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn generate_to_immutable(&self) -> proc_macro2::TokenStream {
+        let immutable_packet_name = self.immutable_packet_name();
+        let mutable_packet_name = self.mutable_packet_name();
+
+        let comment = format!(
+            "Maps from a {} to a {}",
+            mutable_packet_name, immutable_packet_name
+        );
+
+        quote! {
+            #[doc = #comment]
+            #[inline]
+            pub fn to_immutable<'p>(&'p self) -> #immutable_packet_name<'p> {
+                use ::pnet_macros_support::packet::PacketData;
+                #immutable_packet_name { packet: PacketData::Borrowed(self.packet.as_slice()) }
+            }
+        }
+    }
+
+    fn generate_consume_to_immutable(&self) -> proc_macro2::TokenStream {
+        let immutable_packet_name = self.immutable_packet_name();
+        let mutable_packet_name = self.mutable_packet_name();
+
+        let comment = format!(
+            "Maps from a {} to a {} while consuming the source",
+            mutable_packet_name, immutable_packet_name
+        );
+
+        quote! {
+            #[doc = #comment]
+            #[inline]
+            pub fn consume_to_immutable(self) -> #immutable_packet_name<'a> {
+                #immutable_packet_name { packet: self.packet.to_immutable() }
+            }
+        }
+    }
+
+    fn generate_minimum_packet_size(&self, bytes_size: usize) -> proc_macro2::TokenStream {
+        quote! {
+            /// The minimum size (in bytes) a packet of this type can be. It's based on the total size
+            /// of the fixed-size fields.
+            #[inline]
+            pub fn minimum_packet_size() -> usize {
+                #bytes_size
+            }
+        }
+    }
+
+    fn generate_packet_size(&self, struct_size: usize) -> proc_macro2::TokenStream {
+        let base_name = self.base_name();
+
+        let comment = format!(
+            "The size (in bytes) of a {} instance when converted into a byte-array",
+            base_name
+        );
+
+        quote! {
+            #[doc = #comment]
+            #[inline]
+            pub fn packet_size(_packet: &#base_name) -> usize {
+                #struct_size
+            }
+        }
+    }
+
+    fn generate_populate(&self) -> proc_macro2::TokenStream {
+        let base_name = self.base_name();
+
+        let comment = format!(
+            "Populates a {} using a {} structure",
+            self.mutable_packet_name(),
+            base_name
+        );
+
+        let set_fields = self.fields.iter().map(|field| {
+            let field_name = &field.ident;
+            let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+
+            quote! {
+                self.#set_field(packet.#field_name);
+            }
+        });
+
+        quote! {
+            #[doc = #comment]
+            #[inline]
+            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+            pub fn populate(&mut self, packet: &#base_name) {
+                #(#set_fields)*
+            }
+        }
+    }
+}
 
 impl ToTokens for Packet {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let base_name = &self.ident;
-        let immutable_packet_name =
-            syn::Ident::new(&format!("{}Packet", self.ident), Span::call_site());
-        let mutable_packet_name =
-            syn::Ident::new(&format!("Mutable{}Packet", self.ident), Span::call_site());
+        let immutable_packet_name = self.immutable_packet_name();
+        let mutable_packet_name = self.mutable_packet_name();
 
         tokens.append_all([false, true].into_iter().map(|&mutable| {
-            let packet_name = if mutable {
-                &mutable_packet_name
-            } else {
-                &immutable_packet_name
-            };
-            let packet_data = syn::Ident::new(
-                if mutable {
-                    "MutPacketData"
-                } else {
-                    "PacketData"
+            let packet_name = self.packet_name(mutable);
+            let packet_struct = self.generate_packet_struct(mutable);
+
+            let (accessors, bits_offset) = self.fields.iter().fold(
+                (vec![], 0),
+                |(mut accessors, mut bits_offset), field| {
+                    accessors.push(field.generate_accessor(&mut bits_offset));
+
+                    (accessors, bits_offset)
                 },
-                Span::call_site(),
             );
-            let mut_ = if mutable {
-                Some(syn::Ident::new("mut", Span::call_site()))
+            let mut mutators = if mutable {
+                let (mutators, _) = self.fields.iter().fold(
+                    (vec![], 0),
+                    |(mut mutators, mut bits_offset), field| {
+                        mutators.push(field.generate_mutator(&mut bits_offset));
+
+                        (mutators, bits_offset)
+                    },
+                );
+
+                mutators
             } else {
-                None
+                vec![]
             };
 
-            let mut bits_offset = 0usize;
-            let mut accessors = vec![];
-            let mut mutators = vec![];
-
-            for field in &self.fields {
-                let field_name = &field.ident;
-                let field_ty = &field.ty;
-
-                if let Some((bits_size, endianess)) = field.as_primitive() {
-                    let endianess_name = endianess.map_or("host".to_owned(), |e| e.to_string());
-
-                    let comment = format!(
-                        "Get the {} field.
-This field is always stored in {} endianess within the struct, but this accessor returns host order.",
-                        field_name, endianess_name
-                    );
-                    let get_field =
-                        syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
-                    let read_ops = read_operations(bits_offset, bits_size, endianess);
-
-                    accessors.push(quote! {
-                        #[doc = #comment]
-                        #[inline]
-                        #[allow(trivial_numeric_casts)]
-                        #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                        pub fn #get_field(&self) -> #field_ty {{
-                            #(#read_ops)*
-                        }}
-                    });
-
-                    if mutable {
-                        let comment = format!(
-                            "Set the {} field.
-    This field is always stored in {} endianess within the struct, but this accessor returns host order.",
-                            field_name, endianess_name
-                        );
-                        let set_field =
-                            syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
-                        let val = syn::Ident::new("val", Span::call_site());
-                        let write_ops = write_operations(bits_offset, bits_size, endianess, val);
-
-                        mutators.push(quote! {
-                            #[doc = #comment]
-                            #[inline]
-                            #[allow(trivial_numeric_casts)]
-                            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                            pub fn #set_field(&mut self, val: #field_ty) {{
-                                #(#write_ops)*
-                            }}
-                        });
-                    }
-
-                    bits_offset += bits_size;
-                } else if let Some((item_size, endianess)) = field.as_vec() {
-                } else {
-                    let (ctor, setter) = if let Some(ref arg_types) = field.construct_with {
-                        let mut args = vec![];
-                        let mut set_args = vec![];
-
-                        for (idx, arg_ty) in arg_types.iter().enumerate() {
-                            let (bits_size, endianess) = parse_ty(&arg_ty.to_string())
-                                .expect("arguments to #[construct_with] must be primitives");
-
-                            let read_ops = read_operations(bits_offset, bits_size, endianess);
-
-                            args.push(quote! {
-                                #(#read_ops)*
-                            });
-
-                            let write_ops = write_operations(
-                                bits_offset,
-                                bits_size,
-                                endianess,
-                                quote!{ vals.#idx },
-                            );
-
-                            set_args.push(quote! {
-                                #(#write_ops)*
-                            });
-
-                            bits_offset += bits_size;
-                        }
-
-                        (
-                            quote! {
-                                #field_ty ::new( #(#args),* )
-                            },
-                            quote! {
-                                #(#set_args)*
-                            },
-                        )
-                    } else {
-                        let bytes_offset = bits_offset / 8;
-
-                        (
-                            quote! {
-                                #field_ty ::new(&self.packet[#bytes_offset ..])
-                            },
-                            quote! {
-                                self.packet[#bytes_offset .. #bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
-                            },
-                        )
-                    };
-
-                    let comment = format!("Get the value of the {} field", field_name);
-                    let get_field =
-                        syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
-
-                    accessors.push(quote! {
-                        #[doc = #comment]
-                        #[inline]
-                        #[allow(trivial_numeric_casts)]
-                        #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                        pub fn #get_field(&self) -> #field_ty {
-                            #ctor
-                        }
-                    });
-
-                    if mutable {
-                        let comment = format!("Set the value of the {} field", field_name);
-                        let set_field =
-                            syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
-
-                        mutators.push(quote! {
-                            #[doc = #comment]
-                            #[inline]
-                            #[allow(trivial_numeric_casts)]
-                            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                            pub fn #set_field(&mut self, val: #field_ty) {{
-                                use pnet_macros_support::packet::PrimitiveValues;
-
-                                let vals = val.to_primitive_values();
-
-                                #setter
-                            }}
-                        })
-                    }
-                }
-            }
-
-            let new = {
-                let comment = format!(
-                    "Constructs a new {}.
-If the provided buffer is less than the minimum required packet size, this will return None.",
-                    packet_name
-                );
-
-                quote! {
-                    #[doc = #comment]
-                    #[inline]
-                    pub fn new<'p>(packet: &'p #mut_ [u8]) -> Option<#packet_name<'p>> {
-                        if packet.len() >= #packet_name::minimum_packet_size() {
-                            use ::pnet_macros_support::packet:: #packet_data;
-                            Some(#packet_name { packet: #packet_data::Borrowed(packet) })
-                        } else {
-                            None
-                        }
-                    }
-                }
-            };
-
-            let owned = {
-                let comment = format!(
-                    "Constructs a new {0}.
-If the provided buffer is less than the minimum required packet size,
-this will return None. With this constructor the {0} will own its own data
-and the underlying buffer will be dropped when the {0} is.",
-                    packet_name
-                );
-
-                quote! {
-                    #[doc = #comment]
-                    pub fn owned(packet: Vec<u8>) -> Option<#packet_name<'static>> {
-                        if packet.len() >= #packet_name::minimum_packet_size() {
-                            use ::pnet_macros_support::packet::#packet_data;
-                            Some(#packet_name { packet: #packet_data::Owned(packet) })
-                        } else {
-                            None
-                        }
-                    }
-                }
-            };
-
+            let new = self.generate_constructor_new(mutable);
+            let owned = self.generate_constructor_owned(mutable);
             let to_immutable = if mutable {
-                Some({
-                    let comment =
-                        format!("Maps from a {} to a {}", packet_name, immutable_packet_name);
-
-                    quote! {
-                        #[doc = #comment]
-                        #[inline]
-                        pub fn to_immutable<'p>(&'p self) -> #immutable_packet_name<'p> {
-                            use ::pnet_macros_support::packet::PacketData;
-                            #immutable_packet_name { packet: PacketData::Borrowed(self.packet.as_slice()) }
-                        }
-                    }
-                })
+                Some(self.generate_to_immutable())
             } else {
                 None
             };
-
             let consume_to_immutable = if mutable {
-                Some({
-                    let comment = format!(
-                        "Maps from a {} to a {} while consuming the source",
-                        packet_name, immutable_packet_name
-                    );
-
-                    quote! {
-                        #[doc = #comment]
-                        #[inline]
-                        pub fn consume_to_immutable(self) -> #immutable_packet_name<'a> {
-                            #immutable_packet_name { packet: self.packet.to_immutable() }
-                        }
-                    }
-                })
+                Some(self.generate_consume_to_immutable())
             } else {
                 None
             };
-
-            let minimum_packet_size = {
-                let byte_size = (bits_offset + 7) / 8;
-
-                quote! {
-                    /// The minimum size (in bytes) a packet of this type can be. It's based on the total size
-                    /// of the fixed-size fields.
-                    #[inline]
-                    pub fn minimum_packet_size() -> usize {
-                        #byte_size
-                    }
-                }
-            };
-
-            let packet_size = {
-                let mut struct_size = 0usize;
-                let comment = format!(
-                    "The size (in bytes) of a {} instance when converted into a byte-array",
-                    base_name
-                );
-
-                quote! {
-                    #[doc = #comment]
-                    #[inline]
-                    pub fn packet_size(_packet: &#base_name) -> usize {
-                        #struct_size
-                    }
-                }
-            };
-
+            let minimum_packet_size = self.generate_minimum_packet_size((bits_offset + 7) / 8);
+            let packet_size = self.generate_packet_size(0);
             let populate = if mutable {
-                Some({
-                    let comment = format!(
-                        "Populates a {} using a {} structure",
-                        packet_name, base_name
-                    );
-
-                    let set_fields = self.fields.iter().map(|field| {
-                        let field_name = &field.ident;
-                        let set_field =
-                            syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
-
-                        quote! {
-                            self.#set_field(packet.#field_name);
-                        }
-                    });
-
-                    quote! {
-                        #[doc = #comment]
-                        #[inline]
-                        #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                        pub fn populate(&mut self, packet: &#base_name) {
-                            #(#set_fields)*
-                        }
-                    }
-                })
+                Some(self.generate_populate())
             } else {
                 None
             };
 
             quote! {
-                /// A structure enabling manipulation of on the wire packets
-                #[derive(PartialEq)]
-                pub struct #packet_name<'p> {
-                    packet: ::pnet_macros_support::packet:: #packet_data<'p>,
-                }
+                #packet_struct
 
                 impl<'a> #packet_name<'a> {
                     #new
@@ -503,12 +443,18 @@ enum Endianness {
     Big,
 }
 
+impl Endianness {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Endianness::Little => "little",
+            Endianness::Big => "big",
+        }
+    }
+}
+
 impl fmt::Display for Endianness {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Endianness::Little => write!(f, "little"),
-            Endianness::Big => write!(f, "big"),
-        }
+        write!(f, "{}", self.name())
     }
 }
 
@@ -561,6 +507,155 @@ impl Field {
                 }
             }
             _ => None,
+        }
+    }
+
+    fn generate_accessor(&self, bits_offset: &mut usize) -> proc_macro2::TokenStream {
+        let field_name = &self.ident;
+        let field_ty = &self.ty;
+
+        let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+
+        if let Some((bits_size, endianess)) = self.as_primitive() {
+            let endianess_name = endianess.map_or("host", |e| e.name());
+            let comment = format!(
+                        "Get the {} field.
+This field is always stored in {} endianess within the struct, but this accessor returns host order.",
+                        field_name, endianess_name
+                    );
+            let read_ops = read_operations(*bits_offset, bits_size, endianess);
+
+            *bits_offset += bits_size;
+
+            quote! {
+                #[doc = #comment]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn #get_field(&self) -> #field_ty {{
+                    #(#read_ops)*
+                }}
+            }
+        } else if let Some((item_size, endianess)) = self.as_vec() {
+            quote!{}
+        } else {
+            let ctor = if let Some(ref arg_types) = self.construct_with {
+                let mut args = vec![];
+
+                for (idx, arg_ty) in arg_types.iter().enumerate() {
+                    let (bits_size, endianess) = parse_ty(&arg_ty.to_string())
+                        .expect("arguments to #[construct_with] must be primitives");
+
+                    let read_ops = read_operations(*bits_offset, bits_size, endianess);
+
+                    args.push(quote! {
+                        #(#read_ops)*
+                    });
+
+                    *bits_offset += bits_size;
+                }
+
+                quote! {
+                    #field_ty ::new( #(#args),* )
+                }
+            } else {
+                let bytes_offset = (*bits_offset + 7) / 8;
+
+                quote! {
+                    #field_ty ::new(&self.packet[#bytes_offset ..])
+                }
+            };
+
+            let comment = format!("Get the value of the {} field", field_name);
+
+            quote! {
+                #[doc = #comment]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn #get_field(&self) -> #field_ty {
+                    #ctor
+                }
+            }
+        }
+    }
+
+    fn generate_mutator(&self, bits_offset: &mut usize) -> proc_macro2::TokenStream {
+        let field_name = &self.ident;
+        let field_ty = &self.ty;
+
+        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+
+        if let Some((bits_size, endianess)) = self.as_primitive() {
+            let endianess_name = endianess.map_or("host", |e| e.name());
+            let comment = format!(
+                            "Set the {} field.
+    This field is always stored in {} endianess within the struct, but this accessor returns host order.",
+                            field_name, endianess_name
+                        );
+            let write_ops = write_operations(
+                *bits_offset,
+                bits_size,
+                endianess,
+                syn::Ident::new("val", Span::call_site()),
+            );
+
+            *bits_offset += bits_size;
+
+            quote! {
+                #[doc = #comment]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn #set_field(&mut self, val: #field_ty) {{
+                    #(#write_ops)*
+                }}
+            }
+        } else if let Some((item_size, endianess)) = self.as_vec() {
+            quote!{}
+        } else {
+            let setter = if let Some(ref arg_types) = self.construct_with {
+                let mut set_args = vec![];
+
+                for (idx, arg_ty) in arg_types.iter().enumerate() {
+                    let (bits_size, endianess) = parse_ty(&arg_ty.to_string())
+                        .expect("arguments to #[construct_with] must be primitives");
+
+                    let write_ops =
+                        write_operations(*bits_offset, bits_size, endianess, quote!{ vals.#idx });
+
+                    set_args.push(quote! {
+                        #(#write_ops)*
+                    });
+
+                    *bits_offset += bits_size;
+                }
+
+                quote! {
+                    #(#set_args)*
+                }
+            } else {
+                let bytes_offset = (*bits_offset + 7) / 8;
+
+                quote! {
+                    self.packet[#bytes_offset .. #bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
+                }
+            };
+            let comment = format!("Set the value of the {} field", field_name);
+
+            quote! {
+                #[doc = #comment]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn #set_field(&mut self, val: #field_ty) {{
+                    use pnet_macros_support::packet::PrimitiveValues;
+
+                    let vals = val.to_primitive_values();
+
+                    #setter
+                }}
+            }
         }
     }
 }
