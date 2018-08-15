@@ -102,6 +102,10 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Result<Packet> {
 
                     for meta in nested {
                         if let syn::NestedMeta::Meta(syn::Meta::Word(ident)) = meta {
+                            if parse_primitive(&ident.to_string()).is_none() {
+                                bail!("arguments to #[construct_with] must be primitives")
+                            }
+
                             construct_with.push(ident.clone())
                         } else {
                             bail!("#[construct_with] should be of the form #[construct_with(<types>)]")
@@ -112,37 +116,56 @@ fn make_packet(ident: syn::Ident, fields: syn::Fields) -> Result<Packet> {
                     ref ident, ref lit, ..
                 })) if ident == "length" =>
                 {
-                    match lit {
-                        syn::Lit::Str(lit) => packet_length = Some(lit.value()),
-                        syn::Lit::Int(lit) => packet_length = Some(lit.value().to_string()),
+                    let n = match lit {
+                        syn::Lit::Str(lit) => lit.value().parse()?,
+                        syn::Lit::Int(lit) => lit.value(),
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
-                    }
+                    };
+
+                    packet_length = Some(quote!{ #n });
                 }
                 Some(syn::Meta::NameValue(syn::MetaNameValue {
                     ref ident, ref lit, ..
                 })) if ident == "length_fn" =>
                 {
-                    match lit {
-                        syn::Lit::Str(lit) => {
-                            packet_length = Some(lit.value() + "(&_self.to_immutable())")
-                        }
+                    let length_fn = match lit {
+                        syn::Lit::Str(lit) => syn::Ident::new(&lit.value(), Span::call_site()),
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
-                    }
+                    };
+
+                    packet_length = Some(quote! {
+                        #length_fn(&self.to_immutable())
+                    });
                 }
                 _ => bail!("unknown attribute {}", attr.into_token_stream()),
             }
         }
 
-        fields.push(Field {
+        let field = Field {
             ident: field.ident.unwrap(),
             ty: field.ty,
             is_payload,
+            packet_length,
             construct_with: if construct_with.is_empty() {
                 None
             } else {
                 Some(construct_with)
             },
-        })
+        };
+
+        if let Some((inner_ty, item_size, endianess)) = field.as_vec() {
+            if !field.is_payload && field.packet_length.is_none() {
+                bail!("variable length field must have #[length_fn] attribute")
+            }
+
+            if inner_ty == "Vec" {
+                bail!("variable length fields may not contain vectors")
+            }
+        } else if field.as_primitive().is_none() && field.construct_with.is_none() {
+            bail!("non-primitive field types must specify #[construct_with]")
+        }
+
+        fields.push(field)
     }
 
     if !has_payload {
@@ -375,7 +398,7 @@ impl ToTokens for Packet {
                     (accessors, bits_offset)
                 },
             );
-            let mut mutators = if mutable {
+            let mutators = if mutable {
                 let (mutators, _) = self.fields.iter().fold(
                     (vec![], 0),
                     |(mut mutators, mut bits_offset), field| {
@@ -463,6 +486,7 @@ struct Field {
     ty: syn::Type,
     construct_with: Option<Vec<syn::Ident>>,
     is_payload: bool,
+    packet_length: Option<proc_macro2::TokenStream>,
 }
 
 impl Field {
@@ -473,41 +497,14 @@ impl Field {
                 ..
             }) if segments.len() == 1 =>
             {
-                parse_ty(&segments.last()?.value().ident.to_string())
+                parse_primitive(&segments.last()?.value().ident.to_string())
             }
             _ => None,
         }
     }
 
-    fn as_vec(&self) -> Option<(usize, Option<Endianness>)> {
-        match self.ty {
-            syn::Type::Path(syn::TypePath {
-                path: syn::Path { ref segments, .. },
-                ..
-            }) if segments.len() == 1 && segments.last()?.value().ident == "Vec" =>
-            {
-                match segments.last()?.value().arguments {
-                    syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                        ref args,
-                        ..
-                    }) if args.len() == 1 =>
-                    {
-                        match args.last()?.value() {
-                            syn::GenericArgument::Type(syn::Type::Path(syn::TypePath {
-                                path: syn::Path { segments, .. },
-                                ..
-                            })) if segments.len() == 1 =>
-                            {
-                                parse_ty(&segments.last()?.value().ident.to_string())
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+    fn as_vec(&self) -> Option<(syn::Ident, usize, Option<Endianness>)> {
+        parse_vec(&self.ty)
     }
 
     fn generate_accessor(&self, bits_offset: &mut usize) -> proc_macro2::TokenStream {
@@ -536,14 +533,18 @@ This field is always stored in {} endianess within the struct, but this accessor
                     #(#read_ops)*
                 }}
             }
-        } else if let Some((item_size, endianess)) = self.as_vec() {
-            quote!{}
+        } else if let Some((inner_ty, item_size, endianess)) = self.as_vec() {
+            if let Some((bits_size, endianess)) = parse_primitive(&inner_ty.to_string()) {
+                quote!{}
+            } else {
+                quote!{}
+            }
         } else {
             let ctor = if let Some(ref arg_types) = self.construct_with {
                 let mut args = vec![];
 
                 for (idx, arg_ty) in arg_types.iter().enumerate() {
-                    let (bits_size, endianess) = parse_ty(&arg_ty.to_string())
+                    let (bits_size, endianess) = parse_primitive(&arg_ty.to_string())
                         .expect("arguments to #[construct_with] must be primitives");
 
                     let read_ops = read_operations(*bits_offset, bits_size, endianess);
@@ -611,14 +612,18 @@ This field is always stored in {} endianess within the struct, but this accessor
                     #(#write_ops)*
                 }}
             }
-        } else if let Some((item_size, endianess)) = self.as_vec() {
-            quote!{}
+        } else if let Some((inner_ty, item_size, endianess)) = self.as_vec() {
+            if let Some((bits_size, endianess)) = parse_primitive(&inner_ty.to_string()) {
+                quote!{}
+            } else {
+                quote!{}
+            }
         } else {
             let setter = if let Some(ref arg_types) = self.construct_with {
                 let mut set_args = vec![];
 
                 for (idx, arg_ty) in arg_types.iter().enumerate() {
-                    let (bits_size, endianess) = parse_ty(&arg_ty.to_string())
+                    let (bits_size, endianess) = parse_primitive(&arg_ty.to_string())
                         .expect("arguments to #[construct_with] must be primitives");
 
                     let write_ops =
@@ -660,11 +665,7 @@ This field is always stored in {} endianess within the struct, but this accessor
     }
 }
 
-impl ToTokens for Field {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {}
-}
-
-fn parse_ty(ty: &str) -> Option<(usize, Option<Endianness>)> {
+fn parse_primitive(ty: &str) -> Option<(usize, Option<Endianness>)> {
     let re = Regex::new(r"^u([0-9]+)(be|le|he)?$").unwrap();
     let m = re.captures_iter(ty).next()?;
     let size = m.get(1)?.as_str().parse().ok()?;
@@ -676,6 +677,40 @@ fn parse_ty(ty: &str) -> Option<(usize, Option<Endianness>)> {
     };
 
     Some((size, endianess))
+}
+
+fn parse_vec(ty: &syn::Type) -> Option<(syn::Ident, usize, Option<Endianness>)> {
+    match ty {
+        syn::Type::Path(syn::TypePath {
+            path: syn::Path { ref segments, .. },
+            ..
+        }) if segments.len() == 1 && segments.last()?.value().ident == "Vec" =>
+        {
+            match segments.last()?.value().arguments {
+                syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                    ref args,
+                    ..
+                }) if args.len() == 1 =>
+                {
+                    match args.last()?.value() {
+                        syn::GenericArgument::Type(syn::Type::Path(syn::TypePath {
+                            path: syn::Path { segments, .. },
+                            ..
+                        })) if segments.len() == 1 =>
+                        {
+                            let inner_ty = segments.last()?.value().ident.clone();
+
+                            parse_primitive(&inner_ty.to_string())
+                                .map(|(size, endianness)| (inner_ty, size, endianness))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn read_operations(
@@ -772,14 +807,17 @@ mod tests {
 
     #[test]
     fn test_as_primitive() {
-        assert_eq!(parse_ty("u8"), Some((8, Some(Endianness::Big))));
-        assert_eq!(parse_ty("u21be"), Some((21, Some(Endianness::Big))));
-        assert_eq!(parse_ty("u21le"), Some((21, Some(Endianness::Little))));
-        assert_eq!(parse_ty("u21he"), Some((21, None)));
-        assert_eq!(parse_ty("u9"), Some((9, Some(Endianness::Big))));
-        assert_eq!(parse_ty("u16"), Some((16, Some(Endianness::Big))));
-        assert_eq!(parse_ty("uable"), None);
-        assert_eq!(parse_ty("u21re"), None);
-        assert_eq!(parse_ty("i21be"), None);
+        assert_eq!(parse_primitive("u8"), Some((8, Some(Endianness::Big))));
+        assert_eq!(parse_primitive("u21be"), Some((21, Some(Endianness::Big))));
+        assert_eq!(
+            parse_primitive("u21le"),
+            Some((21, Some(Endianness::Little)))
+        );
+        assert_eq!(parse_primitive("u21he"), Some((21, None)));
+        assert_eq!(parse_primitive("u9"), Some((9, Some(Endianness::Big))));
+        assert_eq!(parse_primitive("u16"), Some((16, Some(Endianness::Big))));
+        assert_eq!(parse_primitive("uable"), None);
+        assert_eq!(parse_primitive("u21re"), None);
+        assert_eq!(parse_primitive("i21be"), None);
     }
 }
