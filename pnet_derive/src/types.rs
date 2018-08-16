@@ -49,20 +49,42 @@ pub fn parse_primitive(ty: &syn::Ident) -> Option<(usize, Option<Endianness>)> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    macro_rules! ident {
+        ($name:expr) => {
+            ident!($name, ::proc_macro2::Span::call_site())
+        };
+        ($name:expr, $span:expr) => {
+            ::syn::Ident::new($name, $span)
+        };
+    }
 
     #[test]
-    fn test_as_primitive() {
-        assert_eq!(parse_primitive("u8"), Some((8, Some(Endianness::Big))));
-        assert_eq!(parse_primitive("u21be"), Some((21, Some(Endianness::Big))));
+    fn test_parse_primitive() {
         assert_eq!(
-            parse_primitive("u21le"),
+            parse_primitive(&ident!("u8")),
+            Some((8, Some(Endianness::Big)))
+        );
+        assert_eq!(
+            parse_primitive(&ident!("u21be")),
+            Some((21, Some(Endianness::Big)))
+        );
+        assert_eq!(
+            parse_primitive(&ident!("u21le")),
             Some((21, Some(Endianness::Little)))
         );
-        assert_eq!(parse_primitive("u21he"), Some((21, None)));
-        assert_eq!(parse_primitive("u9"), Some((9, Some(Endianness::Big))));
-        assert_eq!(parse_primitive("u16"), Some((16, Some(Endianness::Big))));
-        assert_eq!(parse_primitive("uable"), None);
-        assert_eq!(parse_primitive("u21re"), None);
-        assert_eq!(parse_primitive("i21be"), None);
+        assert_eq!(parse_primitive(&ident!("u21he")), Some((21, None)));
+        assert_eq!(
+            parse_primitive(&ident!("u9")),
+            Some((9, Some(Endianness::Big)))
+        );
+        assert_eq!(
+            parse_primitive(&ident!("u16")),
+            Some((16, Some(Endianness::Big)))
+        );
+        assert_eq!(parse_primitive(&ident!("uable")), None);
+        assert_eq!(parse_primitive(&ident!("u21re")), None);
+        assert_eq!(parse_primitive(&ident!("i21be")), None);
     }
 }

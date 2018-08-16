@@ -1,5 +1,5 @@
 #![crate_type = "proc-macro"]
-#![recursion_limit = "128"]
+#![recursion_limit = "256"]
 
 #[macro_use]
 extern crate failure;
@@ -11,6 +11,10 @@ extern crate byteorder;
 extern crate itertools;
 extern crate regex;
 extern crate syn;
+
+#[cfg(test)]
+#[macro_use]
+extern crate lazy_static;
 
 mod field;
 mod packet;

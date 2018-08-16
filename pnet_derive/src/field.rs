@@ -1,15 +1,18 @@
 use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
-use syn;
+use syn::{self, spanned::Spanned};
 
 use types::{parse_primitive, Endianness, Result};
 
+#[derive(Clone, Debug)]
 pub struct Field {
     ident: syn::Ident,
     ty: syn::Type,
+    span: Span,
     kind: Kind,
 }
 
+#[derive(Clone, Debug)]
 enum Kind {
     Primitive {
         bits: usize,
@@ -29,6 +32,7 @@ enum Kind {
 
 impl Field {
     pub fn parse(field: syn::Field) -> Result<Self> {
+        let field_span = field.span();
         let field_name = field
             .ident
             .ok_or_else(|| format_err!("all fields in a packet must be named"))?;
@@ -94,7 +98,7 @@ impl Field {
             }
         }
 
-        let kind = match field_ty {
+        match field_ty {
             syn::Type::Path(syn::TypePath {
                 path: syn::Path { ref segments, .. },
                 ..
@@ -121,13 +125,13 @@ impl Field {
                                     if let Some((item_bits, endianness)) = parse_primitive(item_ty)
                                     {
                                         if !is_payload && packet_length.is_none() {
-                                            bail!("variable length field must have #[length_fn] attribute")
+                                            bail!("variable length field must have #[length] or #[length_fn] attribute")
                                         }
                                         if item_ty == "Vec" {
                                             bail!("variable length fields may not contain vectors")
                                         }
-                                        if item_ty != "u8" || item_bits % 8 != 0 {
-                                            bail!("unimplemented variable length field")
+                                        if item_bits % 8 != 0 {
+                                            bail!("variable length fields must align to byte")
                                         }
 
                                         Some(Kind::Vec {
@@ -149,21 +153,70 @@ impl Field {
                 } else if let Some((bits, endianness)) = parse_primitive(&ty.ident) {
                     Some(Kind::Primitive { bits, endianness })
                 } else {
-                    Some(Kind::Custom { construct_with })
+                    None
                 }
             }
             _ => None,
-        }.ok_or_else(|| format_err!("unsupport field type {:?}", field_ty))?;
-
-        Ok(Field {
-            ident: field_name,
-            ty: field_ty,
-            kind,
+        }.or_else(|| {
+            if !construct_with.is_empty() {
+                Some(Kind::Custom { construct_with })
+            } else {
+                None
+            }
         })
+            .ok_or_else(|| format_err!("non-primitive field types must specify #[construct_with]"))
+            .map(|kind| Field {
+                ident: field_name,
+                ty: field_ty,
+                span: field_span,
+                kind,
+            })
     }
 
-    pub fn field_name(&self) -> &syn::Ident {
+    pub fn name(&self) -> &syn::Ident {
         &self.ident
+    }
+
+    pub fn ty(&self) -> &syn::Type {
+        &self.ty
+    }
+
+    pub fn as_primitive(&self) -> Option<(usize, Option<Endianness>)> {
+        match self.kind {
+            Kind::Primitive { bits, endianness } => Some((bits, endianness)),
+            _ => None,
+        }
+    }
+
+    pub fn is_primitive(&self) -> bool {
+        self.as_primitive().is_some()
+    }
+
+    pub fn as_vec(
+        &self,
+    ) -> Option<(
+        &syn::Ident,
+        usize,
+        Option<Endianness>,
+        bool,
+        Option<&TokenStream>,
+    )> {
+        match self.kind {
+            Kind::Vec {
+                ref item_ty,
+                item_bits,
+                endianness,
+                is_payload,
+                ref packet_length,
+            } => Some((
+                item_ty,
+                item_bits,
+                endianness,
+                is_payload,
+                packet_length.as_ref(),
+            )),
+            _ => None,
+        }
     }
 
     pub fn is_vec(&self) -> bool {
@@ -171,6 +224,17 @@ impl Field {
             Kind::Vec { .. } => true,
             _ => false,
         }
+    }
+
+    pub fn as_custom(&self) -> Option<&[syn::Ident]> {
+        match self.kind {
+            Kind::Custom { ref construct_with } => Some(construct_with),
+            _ => None,
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.as_custom().is_some()
     }
 
     pub fn is_payload(&self) -> bool {
@@ -201,7 +265,7 @@ impl Field {
                 packet_length,
             ),
             Kind::Custom { ref construct_with } => {
-                self.generate_typed_accessor(bits_offset, construct_with)
+                self.generate_custom_accessor(bits_offset, construct_with)
             }
         }
     }
@@ -214,17 +278,16 @@ impl Field {
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
-        let comment = format!(
-                        "Get the {} field.
+        let comment = format!("Get the {} field.
 This field is always stored in {} endianness within the struct, but this accessor returns host order.",
-                        field_name, endianness.map_or("host", |e| e.name())
-                    );
+            field_name, endianness.map_or("host", |e| e.name())
+        );
         let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
         let read_ops = read_operations(*bits_offset, bits_size, endianness, quote!{ self.packet });
 
         *bits_offset += bits_size;
 
-        quote! {
+        quote_spanned! { self.span =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -254,9 +317,22 @@ This field is always stored in {} endianness within the struct, but this accesso
         };
 
         if let Some((bits_size, endianness)) = parse_primitive(&inner_ty) {
-            self.generate_vec_primitive_accessor(current_offset, &inner_ty, bits_size, endianness)
+            let vec_primitive_accessor = self.generate_vec_primitive_accessor(
+                current_offset,
+                &inner_ty,
+                bits_size,
+                endianness,
+            );
+
+            quote_spanned! { self.span =>
+                #raw_accessors
+
+                #vec_primitive_accessor
+            }
         } else {
-            quote!{}
+            quote_spanned! { self.span =>
+                #raw_accessors
+            }
         }
     }
 
@@ -271,7 +347,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             let get_field_raw =
                 syn::Ident::new(&format!("get_{}_raw", field_name), Span::call_site());
 
-            quote! {
+            quote_spanned! { self.span =>
                 #[doc = #comment]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
@@ -290,7 +366,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             let get_field_raw_mut =
                 syn::Ident::new(&format!("get_{}_raw_mut", field_name), Span::call_site());
 
-            Some(quote! {
+            Some(quote_spanned! { self.span =>
                 #[doc = #comment]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
@@ -303,7 +379,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             None
         };
 
-        quote! {
+        quote_spanned! { self.span =>
             #get_field_raw
 
             #get_field_raw_mut
@@ -336,7 +412,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             }
         };
 
-        quote! {
+        quote_spanned! { self.span =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -349,7 +425,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         }
     }
 
-    fn generate_typed_accessor(
+    fn generate_custom_accessor(
         &self,
         bits_offset: &mut usize,
         arg_types: &[syn::Ident],
@@ -388,7 +464,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 
         let comment = format!("Get the value of the {} field", field_name);
 
-        quote! {
+        quote_spanned! { self.span =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -419,7 +495,7 @@ This field is always stored in {} endianness within the struct, but this accesso
                 packet_length,
             ),
             Kind::Custom { ref construct_with } => {
-                self.generate_typed_mutator(bits_offset, construct_with)
+                self.generate_custom_mutator(bits_offset, construct_with)
             }
         }
     }
@@ -433,9 +509,8 @@ This field is always stored in {} endianness within the struct, but this accesso
         let field_name = &self.ident;
         let field_ty = &self.ty;
         let endianness_name = endianness.map_or("host", |e| e.name());
-        let comment = format!(
-                            "Set the {} field.
-    This field is always stored in {} endianness within the struct, but this accessor returns host order.",
+        let comment = format!("Set the {} field.
+This field is always stored in {} endianness within the struct, but this accessor returns host order.",
                             field_name, endianness_name
                         );
         let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
@@ -449,7 +524,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 
         *bits_offset += bits_size;
 
-        quote! {
+        quote_spanned! { self.span =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -498,7 +573,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             }
         };
 
-        quote! {
+        quote_spanned! { self.span =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -511,7 +586,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         }
     }
 
-    fn generate_typed_mutator(
+    fn generate_custom_mutator(
         &self,
         bits_offset: &mut usize,
         arg_types: &[syn::Ident],
@@ -554,7 +629,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             }
         };
 
-        quote! {
+        quote_spanned! { self.span =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -572,11 +647,11 @@ This field is always stored in {} endianness within the struct, but this accesso
 
 fn read_operations<T: ToTokens>(
     bits_offset: usize,
-    bits_size: usize,
+    bits: usize,
     endianness: Option<Endianness>,
     packet: T,
 ) -> TokenStream {
-    if bits_offset % 8 == 0 && bits_size % 8 == 0 && bits_size <= 64 {
+    if bits_offset % 8 == 0 && bits % 8 == 0 && bits <= 64 {
         let bytes_offset = bits_offset / 8;
         let endianness_name = syn::Ident::new(
             match endianness {
@@ -587,7 +662,7 @@ fn read_operations<T: ToTokens>(
             Span::call_site(),
         );
 
-        match bits_size {
+        match bits {
             8 => quote! {
                 #packet[#bytes_offset]
             },
@@ -606,23 +681,27 @@ fn read_operations<T: ToTokens>(
             64 => quote! {
                 <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u64(&#packet[#bytes_offset..])
             },
-            _ => quote!{
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_uint(&#packet[#bytes_offset..], #bits_size / 8)
-            },
+            _ => {
+                let bytes = bits / 8;
+
+                quote!{
+                    <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_uint(&#packet[#bytes_offset..], #bytes)
+                }
+            }
         }
     } else {
-        quote!{}
+        unimplemented!()
     }
 }
 
 fn write_operations<T: ToTokens, V: ToTokens>(
     bits_offset: usize,
-    bits_size: usize,
+    bits: usize,
     endianness: Option<Endianness>,
     packet: T,
     val: V,
 ) -> TokenStream {
-    if bits_offset % 8 == 0 && bits_size % 8 == 0 && bits_size <= 64 {
+    if bits_offset % 8 == 0 && bits % 8 == 0 && bits <= 64 {
         let bytes_offset = bits_offset / 8;
         let endianness_name = syn::Ident::new(
             match endianness {
@@ -633,7 +712,7 @@ fn write_operations<T: ToTokens, V: ToTokens>(
             Span::call_site(),
         );
 
-        match bits_size {
+        match bits {
             8 => quote! {
                 #packet[#bytes_offset] = #val;
             },
@@ -652,11 +731,313 @@ fn write_operations<T: ToTokens, V: ToTokens>(
             64 => quote! {
                 <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u64(&mut #packet[#bytes_offset..], #val);
             },
-            _ => quote!{
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bits_size / 8, #val);
-            },
+            _ => {
+                let bytes = bits / 8;
+
+                quote!{
+                    <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bytes, #val);
+                }
+            }
         }
     } else {
-        quote!{}
+        unimplemented!()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! ident {
+        ($name:expr) => {
+            ident!($name, ::proc_macro2::Span::call_site())
+        };
+        ($name:expr, $span:expr) => {
+            ::syn::Ident::new($name, $span)
+        };
+    }
+
+    #[test]
+    fn test_read_operations() {
+        let read_ops = [
+            (0, 8, Some(Endianness::Little), quote! { packet[0usize] }),
+            (8, 16, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&packet[1usize..]) }),
+            (16, 24, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u24(&packet[2usize..]) }),
+            (24, 32, Some(Endianness::Little), quote! { <::byteorder::LittenEndia as ::byteorder::ByteOrder>::read_u32(&packet[3usize..]) }),
+            (32, 48, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u48(&packet[4usize..]) }),
+            (40, 64, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u64(&packet[5usize..]) }),
+            (48, 40, Some(Endianness::Little), quote! { <::byteorder::LittenEndia as ::byteorder::ByteOrder>::read_uint(&packet[6usize..], 5usize) }),
+        ];
+
+        for &(bits_offset, bits, endianness, ref code) in &read_ops {
+            assert_eq!(
+                read_operations(bits_offset, bits, endianness, quote! { packet }).to_string(),
+                code.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_operations() {
+        let write_ops = [
+            (0, 8, Some(Endianness::Little), quote! { packet[0usize] = val; }),
+            (8, 16, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut packet[1usize..], val); }),
+            (16, 24, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u24(&mut packet[2usize..], val); }),
+            (24, 32, Some(Endianness::Little), quote! { <::byteorder::LittenEndian as ::byteorder::ByteOrder>::write_u32(&mut packet[3usize..], val); }),
+            (32, 48, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u48(&mut packet[4usize..], val); }),
+            (40, 64, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u64(&mut packet[5usize..], val); }),
+            (48, 40, Some(Endianness::Little), quote! { <::byteorder::LittenEndian as ::byteorder::ByteOrder>::write_uint(&mut packet[6usize..], 5usize, val); }),
+        ];
+
+        for &(bits_offset, bits, endianness, ref code) in &write_ops {
+            assert_eq!(
+                write_operations(
+                    bits_offset,
+                    bits,
+                    endianness,
+                    quote! { packet },
+                    quote! { val }
+                ).to_string(),
+                code.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn test_primitive_field() {
+        let field = syn::Field {
+            attrs: vec![],
+            vis: syn::Visibility::Inherited,
+            ident: Some(ident!("foo")),
+            colon_token: None,
+            ty: syn::parse_str("u8").unwrap(),
+        };
+
+        let field = Field::parse(field).unwrap();
+
+        assert_eq!(field.name(), "foo");
+        assert!(field.is_primitive());
+        assert_eq!(field.as_primitive(), Some((8, Some(Endianness::Big))));
+
+        let mut bits_offset = 0;
+
+        assert_eq!(
+            field.generate_accessor(false, &mut bits_offset).to_string(),
+            quote! {
+                #[doc = "Get the foo field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_foo(&self) -> u8 {
+                    self.packet[0usize]
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 8);
+
+        assert_eq!(
+            field.generate_mutator(&mut bits_offset).to_string(),
+            quote!{
+                #[doc = "Set the foo field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_foo(&mut self, val: u8 ) {
+                    self.packet[1usize] = val;
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 16);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_field_with_unknown_attributes() {
+        let fields: syn::FieldsNamed = syn::parse_str(
+            "{
+            #[foo]
+            body: Vec<u16>,
+        }",
+        ).unwrap();
+
+        let _ = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_field_with_unsupport_type() {
+        let fields: syn::FieldsNamed = syn::parse_str(
+            "{
+            #[foo]
+            body: HashSet<u16>,
+        }",
+        ).unwrap();
+
+        let _ = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_vec_field_without_length() {
+        let _ = Field::parse(syn::Field {
+            attrs: vec![],
+            vis: syn::Visibility::Inherited,
+            ident: Some(ident!("foo")),
+            colon_token: None,
+            ty: syn::parse_str("Vec<u8>").unwrap(),
+        }).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_vec_field_with_vec_item() {
+        let _ = Field::parse(syn::Field {
+            attrs: vec![],
+            vis: syn::Visibility::Inherited,
+            ident: Some(ident!("foo")),
+            colon_token: None,
+            ty: syn::parse_str("Vec<Vec<u8>>").unwrap(),
+        }).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_vec_field_with_unalined_item() {
+        let _ = Field::parse(syn::Field {
+            attrs: vec![],
+            vis: syn::Visibility::Inherited,
+            ident: Some(ident!("foo")),
+            colon_token: None,
+            ty: syn::parse_str("Vec<u4>").unwrap(),
+        }).unwrap();
+    }
+
+    #[test]
+    fn test_payload_field() {
+        let fields: syn::FieldsNamed = syn::parse_str(
+            "{
+            #[payload]
+            body: Vec<u8>,
+        }",
+        ).unwrap();
+
+        let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(field.name(), "body");
+        assert!(field.is_vec());
+        assert_eq!(
+            field.as_vec().map(
+                |(item_ty, item_bits, endianness, is_payload, packet_length)| (
+                    item_ty.clone(),
+                    item_bits,
+                    endianness,
+                    is_payload,
+                    packet_length.map(|s| s.to_string())
+                )
+            ),
+            Some((ident!("u8"), 8, Some(Endianness::Big), true, None))
+        );
+
+        let mut bits_offset = 16;
+
+        assert_eq!(
+            field.generate_accessor(false, &mut bits_offset).to_string(),
+            quote! {
+                #[doc = "Get the value of the body field (copies contents)" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Vec <u8> {
+                    let packet = &self.packet[2usize..];
+                    packet.to_vec()
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 16);
+
+        assert_eq!(
+            field.generate_mutator(&mut bits_offset).to_string(),
+            quote! {
+               #[doc = "Set the value of the body field (copies contents)"]
+               #[inline]
+               #[allow(trivial_numeric_casts)]
+               #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+               pub fn set_body(&mut self, vals: &[u8]) {
+                   let packet = &mut self.packet[2usize..];
+                   packet.copy_from_slice(vals)
+               }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 16);
+    }
+
+    #[test]
+    fn test_payload_field_with_u16() {
+        let fields: syn::FieldsNamed = syn::parse_str(
+            "{
+            #[payload]
+            body: Vec<u16>,
+        }",
+        ).unwrap();
+
+        let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(field.name(), "body");
+        assert!(field.is_vec());
+        assert_eq!(
+            field.as_vec().map(
+                |(item_ty, item_bits, endianness, is_payload, packet_length)| (
+                    item_ty.clone(),
+                    item_bits,
+                    endianness,
+                    is_payload,
+                    packet_length.map(|s| s.to_string())
+                )
+            ),
+            Some((ident!("u16"), 16, Some(Endianness::Big), true, None))
+        );
+
+        let mut bits_offset = 16;
+
+        assert_eq!(
+            field.generate_accessor(false, &mut bits_offset).to_string(),
+            quote! {
+                #[doc = "Get the value of the body field (copies contents)" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Vec <u16> {
+                    let packet = &self.packet[2usize..];
+                    packet.chunks(2usize).map(|chunk| {
+                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&chunk[0usize..])
+                    }).collect()
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 16);
+
+        assert_eq!(
+            field.generate_mutator(&mut bits_offset).to_string(),
+            quote! {
+               #[doc = "Set the value of the body field (copies contents)"]
+               #[inline]
+               #[allow(trivial_numeric_casts)]
+               #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+               pub fn set_body(&mut self, vals: &[u16]) {
+                   let packet = &mut self.packet[2usize..];
+                   let buf = vals.iter().flat_map(|&v| {
+                       let mut buf = vec![0u8; 2usize];
+                       <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut buf[0usize..], v);
+                       buf.into_iter()
+                    }).collect::<Vec<_>>();
+
+                    packet.copy_from_slice(buf.as_slice())
+               }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 16);
+    }
+
+    #[test]
+    fn test_custom_field() {}
 }

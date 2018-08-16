@@ -10,6 +10,10 @@ readme = "../README.md"
 keywords = ["networking", "bitfields", "packet", "protocol"]
 categories = ["network-programming", "parsing"]
 
+[lib]
+name = "pnet_derive"
+proc-macro = true
+
 [dependencies]
 failure = "0.1"
 proc-macro2 = "0.4.2"
@@ -19,7 +23,5 @@ byteorder = "1.2"
 itertools = "0.7"
 regex = "1.0"
 
-[lib]
-name = "pnet_derive"
-proc-macro = true
-test = false
+[dev-dependencies]
+lazy_static = "1.1"

@@ -1,6 +1,6 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, TokenStreamExt};
-use syn;
+use syn::{self, spanned::Spanned};
 
 use field::Field;
 use types::Result;
@@ -24,6 +24,7 @@ pub fn parse(input: syn::DeriveInput) -> Result<Vec<Packet>> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Packet {
     ident: syn::Ident,
     fields: Vec<Field>,
@@ -296,7 +297,7 @@ and the underlying buffer will be dropped when the {0} is.",
         );
 
         let set_fields = self.fields.iter().map(|field| {
-            let field_name = &field.field_name();
+            let field_name = &field.name();
             let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
 
             if field.is_vec() {
