@@ -16,8 +16,6 @@ mod field;
 mod packet;
 mod types;
 
-use quote::TokenStreamExt;
-
 /// Derives `Packet` with internal attributes.
 #[proc_macro_derive(Packet, attributes(payload, construct_with, length, length_fn))]
 pub fn packet(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -25,9 +23,9 @@ pub fn packet(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .map_err(|err| err.into())
         .and_then(packet::parse)
         .map(|packets| {
-            let mut ts = proc_macro2::TokenStream::new();
-            ts.append_all(packets);
-            ts
+            quote! {
+                #(#packets)*
+            }
         })
         .unwrap_or_else(|err| {
             let message = format!("err {}\n{}", err, err.backtrace());
