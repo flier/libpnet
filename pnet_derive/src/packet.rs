@@ -65,114 +65,21 @@ impl Packet {
     }
 
     fn parse(ident: syn::Ident, fields: syn::Fields) -> Result<Packet> {
-        let packet_fields = match fields {
-            syn::Fields::Named(fields) => fields,
-            _ => bail!("{} all fields in a packet must be named", ident),
-        };
+        if let syn::Fields::Named(fields) = fields {
+            let fields = fields
+                .named
+                .into_iter()
+                .map(Field::parse)
+                .collect::<Result<Vec<_>>>()?;
 
-        let mut fields = vec![];
-        let mut has_payload = false;
-
-        for field in packet_fields.named {
-            let mut is_payload = false;
-            let mut packet_length = None;
-            let mut construct_with = vec![];
-
-            for attr in field.attrs {
-                match attr.interpret_meta() {
-                    Some(syn::Meta::Word(ref ident)) if ident == "payload" => {
-                        if has_payload {
-                            bail!("packet may not have multiple payloads")
-                        }
-
-                        has_payload = true;
-                        is_payload = true;
-                    }
-                    Some(syn::Meta::List(syn::MetaList {
-                        ref ident,
-                        ref nested,
-                        ..
-                    })) if ident == "construct_with" =>
-                    {
-                        if nested.is_empty() {
-                            bail!("#[construct_with] must have at least one argument")
-                        }
-
-                        for meta in nested {
-                            if let syn::NestedMeta::Meta(syn::Meta::Word(ident)) = meta {
-                                if parse_primitive(&ident.to_string()).is_none() {
-                                    bail!("arguments to #[construct_with] must be primitives")
-                                }
-
-                                construct_with.push(ident.clone())
-                            } else {
-                                bail!("#[construct_with] should be of the form #[construct_with(<types>)]")
-                            }
-                        }
-                    }
-                    Some(syn::Meta::NameValue(syn::MetaNameValue {
-                        ref ident, ref lit, ..
-                    })) if ident == "length" =>
-                    {
-                        let n = match lit {
-                            syn::Lit::Str(lit) => lit.value().parse()?,
-                            syn::Lit::Int(lit) => lit.value(),
-                            _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
-                        };
-
-                        packet_length = Some(quote!{ #n });
-                    }
-                    Some(syn::Meta::NameValue(syn::MetaNameValue {
-                        ref ident, ref lit, ..
-                    })) if ident == "length_fn" =>
-                    {
-                        let length_fn = match lit {
-                            syn::Lit::Str(lit) => syn::Ident::new(&lit.value(), Span::call_site()),
-                            _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
-                        };
-
-                        packet_length = Some(quote! {
-                            #length_fn(&self.to_immutable())
-                        });
-                    }
-                    _ => bail!("unknown attribute {}", attr.into_token_stream()),
-                }
+            match fields.iter().filter(|field| field.is_payload()).count() {
+                0 => bail!("#[packet]'s must contain a payload field"),
+                1 => Ok(Packet { ident, fields }),
+                _ => bail!("packet may not have multiple payloads"),
             }
-
-            let field = Field::new(
-                field.ident.unwrap(),
-                field.ty,
-                is_payload,
-                packet_length,
-                if construct_with.is_empty() {
-                    None
-                } else {
-                    Some(construct_with)
-                },
-            );
-
-            if let Some((inner_ty, item_size, _)) = field.as_vec() {
-                if !field.is_payload && field.packet_length.is_none() {
-                    bail!("variable length field must have #[length_fn] attribute")
-                }
-
-                if inner_ty == "Vec" {
-                    bail!("variable length fields may not contain vectors")
-                } else if inner_ty != "u8" || item_size % 8 != 0 {
-                    bail!("unimplemented variable length field")
-                }
-            } else if field.as_primitive().is_none() && field.construct_with.is_none() {
-                bail!("non-primitive field types must specify #[construct_with]")
-            }
-
-            fields.push(field)
+        } else {
+            bail!("{} all fields in a packet must be named", ident)
         }
-
-        if !has_payload {
-            bail!("#[packet]'s must contain a payload")
-        }
-
-        Ok(Packet { ident, fields })
     }
 
     fn generate_packet(&self, mutable: bool) -> TokenStream {

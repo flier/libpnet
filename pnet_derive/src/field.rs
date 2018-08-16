@@ -2,34 +2,113 @@ use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn;
 
-use types::{parse_primitive, parse_vec, Endianness};
+use types::{parse_primitive, parse_vec, Endianness, Result};
 
 pub struct Field {
     ident: syn::Ident,
     ty: syn::Type,
-    pub is_payload: bool,
-    pub packet_length: Option<TokenStream>,
-    pub construct_with: Option<Vec<syn::Ident>>,
+    is_payload: bool,
+    packet_length: Option<TokenStream>,
+    construct_with: Option<Vec<syn::Ident>>,
 }
 
 impl Field {
-    pub fn new(
-        ident: syn::Ident,
-        ty: syn::Type,
-        is_payload: bool,
-        packet_length: Option<TokenStream>,
-        construct_with: Option<Vec<syn::Ident>>,
-    ) -> Self {
-        Field {
-            ident,
-            ty,
-            construct_with,
+    pub fn parse(field: syn::Field) -> Result<Self> {
+        let mut is_payload = false;
+        let mut packet_length = None;
+        let mut construct_with = vec![];
+
+        for attr in field.attrs {
+            match attr.interpret_meta() {
+                Some(syn::Meta::Word(ref ident)) if ident == "payload" => {
+                    is_payload = true;
+                }
+                Some(syn::Meta::List(syn::MetaList {
+                    ref ident,
+                    ref nested,
+                    ..
+                })) if ident == "construct_with" =>
+                {
+                    if nested.is_empty() {
+                        bail!("#[construct_with] must have at least one argument")
+                    }
+
+                    for meta in nested {
+                        if let syn::NestedMeta::Meta(syn::Meta::Word(ident)) = meta {
+                            if parse_primitive(&ident.to_string()).is_none() {
+                                bail!("arguments to #[construct_with] must be primitives")
+                            }
+
+                            construct_with.push(ident.clone())
+                        } else {
+                            bail!("#[construct_with] should be of the form #[construct_with(<types>)]")
+                        }
+                    }
+                }
+                Some(syn::Meta::NameValue(syn::MetaNameValue {
+                    ref ident, ref lit, ..
+                })) if ident == "length" =>
+                {
+                    let n = match lit {
+                        syn::Lit::Str(lit) => lit.value().parse()?,
+                        syn::Lit::Int(lit) => lit.value(),
+                        _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
+                    };
+
+                    packet_length = Some(quote!{ #n });
+                }
+                Some(syn::Meta::NameValue(syn::MetaNameValue {
+                    ref ident, ref lit, ..
+                })) if ident == "length_fn" =>
+                {
+                    let length_fn = match lit {
+                        syn::Lit::Str(lit) => syn::Ident::new(&lit.value(), Span::call_site()),
+                        _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
+                    };
+
+                    packet_length = Some(quote! {
+                        #length_fn(&self.to_immutable())
+                    });
+                }
+                _ => bail!("unknown attribute {}", attr.into_token_stream()),
+            }
+        }
+
+        let field = Field {
+            ident: field.ident.unwrap(),
+            ty: field.ty,
             is_payload,
             packet_length,
+            construct_with: if construct_with.is_empty() {
+                None
+            } else {
+                Some(construct_with)
+            },
+        };
+
+        if let Some((inner_ty, item_size, _)) = field.as_vec() {
+            if !field.is_payload && field.packet_length.is_none() {
+                bail!("variable length field must have #[length_fn] attribute")
+            }
+
+            if inner_ty == "Vec" {
+                bail!("variable length fields may not contain vectors")
+            } else if inner_ty != "u8" || item_size % 8 != 0 {
+                bail!("unimplemented variable length field")
+            }
+        } else if field.as_primitive().is_none() && field.construct_with.is_none() {
+            bail!("non-primitive field types must specify #[construct_with]")
         }
+
+        Ok(field)
     }
+
     pub fn field_name(&self) -> &syn::Ident {
         &self.ident
+    }
+
+    pub fn is_payload(&self) -> bool {
+        self.is_payload
     }
 
     pub fn as_primitive(&self) -> Option<(usize, Option<Endianness>)> {
