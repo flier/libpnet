@@ -28,9 +28,10 @@ impl fmt::Display for Endianness {
     }
 }
 
-pub fn parse_primitive(ty: &str) -> Option<(usize, Option<Endianness>)> {
+pub fn parse_primitive(ty: &syn::Ident) -> Option<(usize, Option<Endianness>)> {
     let re = Regex::new(r"^u([0-9]+)(be|le|he)?$").unwrap();
-    let m = re.captures_iter(ty).next()?;
+    let ty_name = ty.to_string();
+    let m = re.captures_iter(&ty_name).next()?;
     let size = m.get(1)?.as_str().parse().ok()?;
     let endianess = match m.get(2).map(|m| m.as_str()) {
         Some("le") => Some(Endianness::Little),
@@ -44,40 +45,6 @@ pub fn parse_primitive(ty: &str) -> Option<(usize, Option<Endianness>)> {
     }
 
     Some((size, endianess))
-}
-
-pub fn parse_vec(ty: &syn::Type) -> Option<(syn::Ident, usize, Option<Endianness>)> {
-    match ty {
-        syn::Type::Path(syn::TypePath {
-            path: syn::Path { ref segments, .. },
-            ..
-        }) if segments.len() == 1 && segments.last()?.value().ident == "Vec" =>
-        {
-            match segments.last()?.value().arguments {
-                syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                    ref args,
-                    ..
-                }) if args.len() == 1 =>
-                {
-                    match args.last()?.value() {
-                        syn::GenericArgument::Type(syn::Type::Path(syn::TypePath {
-                            path: syn::Path { segments, .. },
-                            ..
-                        })) if segments.len() == 1 =>
-                        {
-                            let inner_ty = segments.last()?.value().ident.clone();
-
-                            parse_primitive(&inner_ty.to_string())
-                                .map(|(size, endianness)| (inner_ty, size, endianness))
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

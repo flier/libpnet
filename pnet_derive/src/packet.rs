@@ -3,7 +3,7 @@ use quote::{ToTokens, TokenStreamExt};
 use syn;
 
 use field::Field;
-use types::{parse_primitive, Result};
+use types::Result;
 
 pub fn parse(input: syn::DeriveInput) -> Result<Vec<Packet>> {
     let name = input.ident;
@@ -299,7 +299,7 @@ and the underlying buffer will be dropped when the {0} is.",
             let field_name = &field.field_name();
             let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
 
-            if field.as_vec().is_some() {
+            if field.is_vec() {
                 quote! {
                     self.#set_field(&packet.#field_name);
                 }

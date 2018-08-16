@@ -2,14 +2,29 @@ use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn;
 
-use types::{parse_primitive, parse_vec, Endianness, Result};
+use types::{parse_primitive, Endianness, Result};
 
 pub struct Field {
     ident: syn::Ident,
     ty: syn::Type,
-    is_payload: bool,
-    packet_length: Option<TokenStream>,
-    construct_with: Option<Vec<syn::Ident>>,
+    kind: Kind,
+}
+
+enum Kind {
+    Primitive {
+        bits: usize,
+        endianness: Option<Endianness>,
+    },
+    Vec {
+        item_ty: syn::Ident,
+        item_bits: usize,
+        endianness: Option<Endianness>,
+        is_payload: bool,
+        packet_length: Option<TokenStream>,
+    },
+    Custom {
+        construct_with: Vec<syn::Ident>,
+    },
 }
 
 impl Field {
@@ -17,6 +32,7 @@ impl Field {
         let mut is_payload = false;
         let mut packet_length = None;
         let mut construct_with = vec![];
+        let field_ty = field.ty;
 
         for attr in field.attrs {
             match attr.interpret_meta() {
@@ -35,7 +51,7 @@ impl Field {
 
                     for meta in nested {
                         if let syn::NestedMeta::Meta(syn::Meta::Word(ident)) = meta {
-                            if parse_primitive(&ident.to_string()).is_none() {
+                            if parse_primitive(&ident).is_none() {
                                 bail!("arguments to #[construct_with] must be primitives")
                             }
 
@@ -74,67 +90,115 @@ impl Field {
             }
         }
 
-        let field = Field {
+        let kind = match field_ty {
+            syn::Type::Path(syn::TypePath {
+                path: syn::Path { ref segments, .. },
+                ..
+            }) if segments.len() == 1 =>
+            {
+                let segment = segments.last().unwrap();
+                let ty = segment.value();
+
+                if ty.ident == "Vec" {
+                    match ty.arguments {
+                        syn::PathArguments::AngleBracketed(
+                            syn::AngleBracketedGenericArguments { ref args, .. },
+                        ) if args.len() == 1 =>
+                        {
+                            match args.last().unwrap().value() {
+                                syn::GenericArgument::Type(syn::Type::Path(syn::TypePath {
+                                    path: syn::Path { segments, .. },
+                                    ..
+                                })) if segments.len() == 1 =>
+                                {
+                                    let segment = segments.last().unwrap();
+                                    let item_ty = &segment.value().ident;
+
+                                    if let Some((item_bits, endianness)) = parse_primitive(item_ty)
+                                    {
+                                        if !is_payload && packet_length.is_none() {
+                                            bail!("variable length field must have #[length_fn] attribute")
+                                        }
+                                        if item_ty == "Vec" {
+                                            bail!("variable length fields may not contain vectors")
+                                        }
+                                        if item_ty != "u8" || item_bits % 8 != 0 {
+                                            bail!("unimplemented variable length field")
+                                        }
+
+                                        Some(Kind::Vec {
+                                            item_ty: item_ty.clone(),
+                                            item_bits,
+                                            endianness,
+                                            is_payload,
+                                            packet_length,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                } else if let Some((bits, endianness)) = parse_primitive(&ty.ident) {
+                    Some(Kind::Primitive { bits, endianness })
+                } else {
+                    Some(Kind::Custom { construct_with })
+                }
+            }
+            _ => None,
+        }.ok_or_else(|| format_err!("unsupport field type {:?}", field_ty))?;
+
+        Ok(Field {
             ident: field.ident.unwrap(),
-            ty: field.ty,
-            is_payload,
-            packet_length,
-            construct_with: if construct_with.is_empty() {
-                None
-            } else {
-                Some(construct_with)
-            },
-        };
-
-        if let Some((inner_ty, item_size, _)) = field.as_vec() {
-            if !field.is_payload && field.packet_length.is_none() {
-                bail!("variable length field must have #[length_fn] attribute")
-            }
-
-            if inner_ty == "Vec" {
-                bail!("variable length fields may not contain vectors")
-            } else if inner_ty != "u8" || item_size % 8 != 0 {
-                bail!("unimplemented variable length field")
-            }
-        } else if field.as_primitive().is_none() && field.construct_with.is_none() {
-            bail!("non-primitive field types must specify #[construct_with]")
-        }
-
-        Ok(field)
+            ty: field_ty,
+            kind,
+        })
     }
 
     pub fn field_name(&self) -> &syn::Ident {
         &self.ident
     }
 
-    pub fn is_payload(&self) -> bool {
-        self.is_payload
-    }
-
-    pub fn as_primitive(&self) -> Option<(usize, Option<Endianness>)> {
-        match self.ty {
-            syn::Type::Path(syn::TypePath {
-                path: syn::Path { ref segments, .. },
-                ..
-            }) if segments.len() == 1 =>
-            {
-                parse_primitive(&segments.last()?.value().ident.to_string())
-            }
-            _ => None,
+    pub fn is_vec(&self) -> bool {
+        match self.kind {
+            Kind::Vec { .. } => true,
+            _ => false,
         }
     }
 
-    pub fn as_vec(&self) -> Option<(syn::Ident, usize, Option<Endianness>)> {
-        parse_vec(&self.ty)
+    pub fn is_payload(&self) -> bool {
+        match self.kind {
+            Kind::Vec { is_payload, .. } => is_payload,
+            _ => false,
+        }
     }
 
     pub fn generate_accessor(&self, mutable: bool, bits_offset: &mut usize) -> TokenStream {
-        if let Some((bits_size, endianess)) = self.as_primitive() {
-            self.generate_primitive_accessor(bits_offset, bits_size, endianess)
-        } else if let Some((inner_ty, item_size, endianess)) = self.as_vec() {
-            self.generate_vec_accessor(mutable, bits_offset, &inner_ty, item_size, endianess)
-        } else {
-            self.generate_typed_accessor(bits_offset)
+        match self.kind {
+            Kind::Primitive { bits, endianness } => {
+                self.generate_primitive_accessor(bits_offset, bits, endianness)
+            }
+            Kind::Vec {
+                ref item_ty,
+                item_bits,
+                endianness,
+                is_payload,
+                ref packet_length,
+            } => self.generate_vec_accessor(
+                mutable,
+                bits_offset,
+                item_ty,
+                item_bits,
+                endianness,
+                is_payload,
+                packet_length,
+            ),
+            Kind::Custom { ref construct_with } => {
+                self.generate_typed_accessor(bits_offset, construct_with)
+            }
         }
     }
 
@@ -142,17 +206,17 @@ impl Field {
         &self,
         bits_offset: &mut usize,
         bits_size: usize,
-        endianess: Option<Endianness>,
+        endianness: Option<Endianness>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
         let comment = format!(
                         "Get the {} field.
-This field is always stored in {} endianess within the struct, but this accessor returns host order.",
-                        field_name, endianess.map_or("host", |e| e.name())
+This field is always stored in {} endianness within the struct, but this accessor returns host order.",
+                        field_name, endianness.map_or("host", |e| e.name())
                     );
         let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
-        let read_ops = read_operations(*bits_offset, bits_size, endianess, quote!{ self.packet });
+        let read_ops = read_operations(*bits_offset, bits_size, endianness, quote!{ self.packet });
 
         *bits_offset += bits_size;
 
@@ -173,18 +237,20 @@ This field is always stored in {} endianess within the struct, but this accessor
         bits_offset: &mut usize,
         inner_ty: &syn::Ident,
         item_size: usize,
-        endianess: Option<Endianness>,
+        endianness: Option<Endianness>,
+        is_payload: bool,
+        packet_length: &Option<TokenStream>,
     ) -> TokenStream {
         let current_offset = (*bits_offset + 7) / 8;
 
-        let raw_accessors = if !self.is_payload {
+        let raw_accessors = if !is_payload {
             Some(self.generate_vec_raw_accessors(mutable, current_offset))
         } else {
             None
         };
 
-        if let Some((bits_size, endianess)) = parse_primitive(&inner_ty.to_string()) {
-            self.generate_vec_primitive_accessor(current_offset, &inner_ty, bits_size, endianess)
+        if let Some((bits_size, endianness)) = parse_primitive(&inner_ty) {
+            self.generate_vec_primitive_accessor(current_offset, &inner_ty, bits_size, endianness)
         } else {
             quote!{}
         }
@@ -245,7 +311,7 @@ This field is always stored in {} endianess within the struct, but this accessor
         current_offset: usize,
         inner_ty: &syn::Ident,
         bits_size: usize,
-        endianess: Option<Endianness>,
+        endianness: Option<Endianness>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -259,7 +325,7 @@ This field is always stored in {} endianess within the struct, but this accessor
             }
         } else {
             let item_size = bits_size / 8;
-            let read_ops = read_operations(0, bits_size, endianess, quote! { chunk });
+            let read_ops = read_operations(0, bits_size, endianness, quote! { chunk });
 
             quote! {
                 packet.chunks(#item_size).map(|chunk| { #read_ops }).collect()
@@ -279,20 +345,30 @@ This field is always stored in {} endianess within the struct, but this accessor
         }
     }
 
-    fn generate_typed_accessor(&self, bits_offset: &mut usize) -> TokenStream {
+    fn generate_typed_accessor(
+        &self,
+        bits_offset: &mut usize,
+        arg_types: &[syn::Ident],
+    ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
         let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
 
-        let ctor = if let Some(ref arg_types) = self.construct_with {
+        let ctor = if arg_types.is_empty() {
+            let bytes_offset = (*bits_offset + 7) / 8;
+
+            quote! {
+                #field_ty ::new(&self.packet[#bytes_offset ..])
+            }
+        } else {
             let mut args = vec![];
 
             for arg_ty in arg_types {
-                let (bits_size, endianess) = parse_primitive(&arg_ty.to_string())
+                let (bits_size, endianness) = parse_primitive(&arg_ty)
                     .expect("arguments to #[construct_with] must be primitives");
 
                 let read_ops =
-                    read_operations(*bits_offset, bits_size, endianess, quote! { self.packet });
+                    read_operations(*bits_offset, bits_size, endianness, quote! { self.packet });
 
                 args.push(quote! {
                     #(#read_ops)*
@@ -303,12 +379,6 @@ This field is always stored in {} endianess within the struct, but this accessor
 
             quote! {
                 #field_ty ::new( #(#args),* )
-            }
-        } else {
-            let bytes_offset = (*bits_offset + 7) / 8;
-
-            quote! {
-                #field_ty ::new(&self.packet[#bytes_offset ..])
             }
         };
 
@@ -326,16 +396,27 @@ This field is always stored in {} endianess within the struct, but this accessor
     }
 
     pub fn generate_mutator(&self, bits_offset: &mut usize) -> TokenStream {
-        if let Some((bits_size, endianess)) = self.as_primitive() {
-            self.generate_primitive_mutator(bits_offset, bits_size, endianess)
-        } else if let Some((inner_ty, item_size, endianess)) = self.as_vec() {
-            if let Some((bits_size, endianess)) = parse_primitive(&inner_ty.to_string()) {
-                self.generate_vec_primitive_mutator(bits_offset, &inner_ty, bits_size, endianess)
-            } else {
-                quote!{}
+        match self.kind {
+            Kind::Primitive { bits, endianness } => {
+                self.generate_primitive_mutator(bits_offset, bits, endianness)
             }
-        } else {
-            self.generate_typed_mutator(bits_offset)
+            Kind::Vec {
+                ref item_ty,
+                item_bits,
+                endianness,
+                is_payload,
+                ref packet_length,
+            } => self.generate_vec_primitive_mutator(
+                bits_offset,
+                item_ty,
+                item_bits,
+                endianness,
+                is_payload,
+                packet_length,
+            ),
+            Kind::Custom { ref construct_with } => {
+                self.generate_typed_mutator(bits_offset, construct_with)
+            }
         }
     }
 
@@ -343,21 +424,21 @@ This field is always stored in {} endianess within the struct, but this accessor
         &self,
         bits_offset: &mut usize,
         bits_size: usize,
-        endianess: Option<Endianness>,
+        endianness: Option<Endianness>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
-        let endianess_name = endianess.map_or("host", |e| e.name());
+        let endianness_name = endianness.map_or("host", |e| e.name());
         let comment = format!(
                             "Set the {} field.
-    This field is always stored in {} endianess within the struct, but this accessor returns host order.",
-                            field_name, endianess_name
+    This field is always stored in {} endianness within the struct, but this accessor returns host order.",
+                            field_name, endianness_name
                         );
         let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
         let write_ops = write_operations(
             *bits_offset,
             bits_size,
-            endianess,
+            endianness,
             quote! { self.packet },
             quote! { val },
         );
@@ -380,7 +461,9 @@ This field is always stored in {} endianess within the struct, but this accessor
         bits_offset: &mut usize,
         inner_ty: &syn::Ident,
         bits_size: usize,
-        endianess: Option<Endianness>,
+        endianness: Option<Endianness>,
+        is_payload: bool,
+        packet_length: &Option<TokenStream>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -395,7 +478,8 @@ This field is always stored in {} endianess within the struct, but this accessor
             }
         } else {
             let bytes_size = (bits_size + 7) / 8;
-            let write_ops = write_operations(0, bits_size, endianess, quote! { buf }, quote! { v });
+            let write_ops =
+                write_operations(0, bits_size, endianness, quote! { buf }, quote! { v });
 
             quote!{
                 let buf = vals.iter().flat_map(|&v| {
@@ -423,23 +507,33 @@ This field is always stored in {} endianess within the struct, but this accessor
         }
     }
 
-    fn generate_typed_mutator(&self, bits_offset: &mut usize) -> TokenStream {
+    fn generate_typed_mutator(
+        &self,
+        bits_offset: &mut usize,
+        arg_types: &[syn::Ident],
+    ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
         let comment = format!("Set the value of the {} field", field_name);
         let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
 
-        let setter = if let Some(ref arg_types) = self.construct_with {
+        let setter = if arg_types.is_empty() {
+            let bytes_offset = (*bits_offset + 7) / 8;
+
+            quote! {
+                self.packet[#bytes_offset .. #bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
+            }
+        } else {
             let mut set_args = vec![];
 
             for (idx, arg_ty) in arg_types.iter().enumerate() {
-                let (bits_size, endianess) = parse_primitive(&arg_ty.to_string())
+                let (bits_size, endianness) = parse_primitive(&arg_ty)
                     .expect("arguments to #[construct_with] must be primitives");
 
                 let write_ops = write_operations(
                     *bits_offset,
                     bits_size,
-                    endianess,
+                    endianness,
                     quote! { self.packet },
                     quote!{ vals.#idx },
                 );
@@ -453,12 +547,6 @@ This field is always stored in {} endianess within the struct, but this accessor
 
             quote! {
                 #(#set_args)*
-            }
-        } else {
-            let bytes_offset = (*bits_offset + 7) / 8;
-
-            quote! {
-                self.packet[#bytes_offset .. #bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
             }
         };
 
@@ -481,13 +569,13 @@ This field is always stored in {} endianess within the struct, but this accessor
 fn read_operations<T: ToTokens>(
     bits_offset: usize,
     bits_size: usize,
-    endianess: Option<Endianness>,
+    endianness: Option<Endianness>,
     packet: T,
 ) -> TokenStream {
     if bits_offset % 8 == 0 && bits_size % 8 == 0 && bits_size <= 64 {
         let bytes_offset = bits_offset / 8;
-        let endianess_name = syn::Ident::new(
-            match endianess {
+        let endianness_name = syn::Ident::new(
+            match endianness {
                 Some(Endianness::Little) => "LittenEndia",
                 Some(Endianness::Big) => "BigEndian",
                 None => "NativeEndian",
@@ -500,22 +588,22 @@ fn read_operations<T: ToTokens>(
                 #packet[#bytes_offset]
             },
             16 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::read_u16(&#packet[#bytes_offset..])
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u16(&#packet[#bytes_offset..])
             },
             24 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::read_u24(&#packet[#bytes_offset..])
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u24(&#packet[#bytes_offset..])
             },
             32 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::read_u32(&#packet[#bytes_offset..])
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u32(&#packet[#bytes_offset..])
             },
             48 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::read_u48(&#packet[#bytes_offset..])
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u48(&#packet[#bytes_offset..])
             },
             64 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::read_u64(&#packet[#bytes_offset..])
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u64(&#packet[#bytes_offset..])
             },
             _ => quote!{
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::read_uint(&#packet[#bytes_offset..], #bits_size / 8)
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_uint(&#packet[#bytes_offset..], #bits_size / 8)
             },
         }
     } else {
@@ -526,14 +614,14 @@ fn read_operations<T: ToTokens>(
 fn write_operations<T: ToTokens, V: ToTokens>(
     bits_offset: usize,
     bits_size: usize,
-    endianess: Option<Endianness>,
+    endianness: Option<Endianness>,
     packet: T,
     val: V,
 ) -> TokenStream {
     if bits_offset % 8 == 0 && bits_size % 8 == 0 && bits_size <= 64 {
         let bytes_offset = bits_offset / 8;
-        let endianess_name = syn::Ident::new(
-            match endianess {
+        let endianness_name = syn::Ident::new(
+            match endianness {
                 Some(Endianness::Little) => "LittenEndian",
                 Some(Endianness::Big) => "BigEndian",
                 None => "NativeEndian",
@@ -546,22 +634,22 @@ fn write_operations<T: ToTokens, V: ToTokens>(
                 #packet[#bytes_offset] = #val;
             },
             16 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u16(&mut #packet[#bytes_offset..], #val);
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u16(&mut #packet[#bytes_offset..], #val);
             },
             24 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u24(&mut #packet[#bytes_offset..], #val);
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u24(&mut #packet[#bytes_offset..], #val);
             },
             32 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u32(&mut #packet[#bytes_offset..], #val);
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u32(&mut #packet[#bytes_offset..], #val);
             },
             48 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u48(&mut #packet[#bytes_offset..], #val);
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u48(&mut #packet[#bytes_offset..], #val);
             },
             64 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u64(&mut #packet[#bytes_offset..], #val);
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u64(&mut #packet[#bytes_offset..], #val);
             },
             _ => quote!{
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bits_size / 8, #val);
+                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bits_size / 8, #val);
             },
         }
     } else {
