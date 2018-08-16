@@ -29,10 +29,14 @@ enum Kind {
 
 impl Field {
     pub fn parse(field: syn::Field) -> Result<Self> {
+        let field_name = field
+            .ident
+            .ok_or_else(|| format_err!("all fields in a packet must be named"))?;
+        let field_ty = field.ty;
+
         let mut is_payload = false;
         let mut packet_length = None;
         let mut construct_with = vec![];
-        let field_ty = field.ty;
 
         for attr in field.attrs {
             match attr.interpret_meta() {
@@ -152,7 +156,7 @@ impl Field {
         }.ok_or_else(|| format_err!("unsupport field type {:?}", field_ty))?;
 
         Ok(Field {
-            ident: field.ident.unwrap(),
+            ident: field_name,
             ty: field_ty,
             kind,
         })
