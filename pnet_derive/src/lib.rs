@@ -753,7 +753,8 @@ This field is always stored in {} endianess within the struct, but this accessor
             *bits_offset,
             bits_size,
             endianess,
-            syn::Ident::new("val", Span::call_site()),
+            quote! { self.packet },
+            quote! { val },
         );
 
         *bits_offset += bits_size;
@@ -785,12 +786,23 @@ This field is always stored in {} endianess within the struct, but this accessor
         let current_offset = (*bits_offset + 7) / 8;
         let write_ops = if inner_ty == "u8" {
             quote! {
-                let packet = &mut self.packet[#current_offset..];
-
                 packet.copy_from_slice(vals)
             }
         } else {
-            quote!{}
+            let bytes_size = (bits_size + 7) / 8;
+            let write_ops = write_operations(0, bits_size, endianess, quote! { buf }, quote! { v });
+
+            quote!{
+                let buf = vals.iter().flat_map(|&v| {
+                    let mut buf = vec![0u8; #bytes_size];
+
+                    #write_ops
+
+                    buf.into_iter()
+                }).collect::<Vec<_>>();
+
+                packet.copy_from_slice(buf.as_slice())
+            }
         };
 
         quote! {
@@ -799,6 +811,8 @@ This field is always stored in {} endianess within the struct, but this accessor
             #[allow(trivial_numeric_casts)]
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #set_field(&mut self, vals: &[#inner_ty]) {
+                let packet = &mut self.packet[#current_offset..];
+
                 #write_ops
             }
         }
@@ -817,8 +831,13 @@ This field is always stored in {} endianess within the struct, but this accessor
                 let (bits_size, endianess) = parse_primitive(&arg_ty.to_string())
                     .expect("arguments to #[construct_with] must be primitives");
 
-                let write_ops =
-                    write_operations(*bits_offset, bits_size, endianess, quote!{ vals.#idx });
+                let write_ops = write_operations(
+                    *bits_offset,
+                    bits_size,
+                    endianess,
+                    quote! { self.packet },
+                    quote!{ vals.#idx },
+                );
 
                 set_args.push(quote! {
                     #(#write_ops)*
@@ -906,11 +925,11 @@ fn parse_vec(ty: &syn::Type) -> Option<(syn::Ident, usize, Option<Endianness>)> 
     }
 }
 
-fn read_operations(
+fn read_operations<T: ToTokens>(
     bits_offset: usize,
     bits_size: usize,
     endianess: Option<Endianness>,
-    packet: proc_macro2::TokenStream,
+    packet: T,
 ) -> proc_macro2::TokenStream {
     if bits_offset % 8 == 0 && bits_size % 8 == 0 && bits_size <= 64 {
         let bytes_offset = bits_offset / 8;
@@ -951,11 +970,12 @@ fn read_operations(
     }
 }
 
-fn write_operations<T: ToTokens>(
+fn write_operations<T: ToTokens, V: ToTokens>(
     bits_offset: usize,
     bits_size: usize,
     endianess: Option<Endianness>,
-    val: T,
+    packet: T,
+    val: V,
 ) -> proc_macro2::TokenStream {
     if bits_offset % 8 == 0 && bits_size % 8 == 0 && bits_size <= 64 {
         let bytes_offset = bits_offset / 8;
@@ -970,25 +990,25 @@ fn write_operations<T: ToTokens>(
 
         match bits_size {
             8 => quote! {
-                self.packet[#bytes_offset] = #val;
+                #packet[#bytes_offset] = #val;
             },
             16 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u16(&mut self.packet[#bytes_offset..], #val);
+                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u16(&mut #packet[#bytes_offset..], #val);
             },
             24 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u24(&mut self.packet[#bytes_offset..], #val);
+                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u24(&mut #packet[#bytes_offset..], #val);
             },
             32 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u32(&mut self.packet[#bytes_offset..], #val);
+                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u32(&mut #packet[#bytes_offset..], #val);
             },
             48 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u48(&mut self.packet[#bytes_offset..], #val);
+                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u48(&mut #packet[#bytes_offset..], #val);
             },
             64 => quote! {
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u64(&mut self.packet[#bytes_offset..], #val);
+                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_u64(&mut #packet[#bytes_offset..], #val);
             },
             _ => quote!{
-                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_uint(&mut self.packet[#bytes_offset..], #bits_size / 8, #val);
+                <::byteorder:: #endianess_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bits_size / 8, #val);
             },
         }
     } else {
