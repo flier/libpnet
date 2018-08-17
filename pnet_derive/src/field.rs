@@ -22,12 +22,10 @@ enum Kind {
         item_ty: syn::Ident,
         item_bits: usize,
         endianness: Option<Endianness>,
-        is_payload: bool,
         packet_length: Option<TokenStream>,
     },
     Custom {
         construct_with: Vec<syn::Ident>,
-        is_payload: bool,
     },
 }
 
@@ -74,13 +72,19 @@ impl Field {
                     ref ident, ref lit, ..
                 })) if ident == "length" =>
                 {
-                    let n = match lit {
-                        syn::Lit::Str(lit) => lit.value().parse()?,
-                        syn::Lit::Int(lit) => lit.value(),
+                    packet_length = match lit {
+                        syn::Lit::Str(lit) => {
+                            let expr: syn::Expr = syn::parse_str(&lit.value())?;
+
+                            Some(quote!{ #expr })
+                        }
+                        syn::Lit::Int(lit) => {
+                            let n = lit.value() as usize;
+
+                            Some(quote!{ #n })
+                        }
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     };
-
-                    packet_length = Some(quote!{ #n });
                 }
                 Some(syn::Meta::NameValue(syn::MetaNameValue {
                     ref ident, ref lit, ..
@@ -139,7 +143,6 @@ impl Field {
                                             item_ty: item_ty.clone(),
                                             item_bits,
                                             endianness,
-                                            is_payload,
                                             packet_length,
                                         })
                                     } else {
@@ -160,10 +163,7 @@ impl Field {
             _ => None,
         }.or_else(|| {
             if !construct_with.is_empty() || is_payload {
-                Some(Kind::Custom {
-                    construct_with,
-                    is_payload,
-                })
+                Some(Kind::Custom { construct_with })
             } else {
                 None
             }
@@ -192,46 +192,33 @@ impl Field {
         }
     }
 
-    pub fn as_vec(
-        &self,
-    ) -> Option<(
-        &syn::Ident,
-        usize,
-        Option<Endianness>,
-        bool,
-        Option<&TokenStream>,
-    )> {
+    pub fn as_vec(&self) -> Option<(&syn::Ident, usize, Option<Endianness>, Option<&TokenStream>)> {
         match self.kind {
             Kind::Vec {
                 ref item_ty,
                 item_bits,
                 endianness,
-                is_payload,
                 ref packet_length,
-            } => Some((
-                item_ty,
-                item_bits,
-                endianness,
-                is_payload,
-                packet_length.as_ref(),
-            )),
+            } => Some((item_ty, item_bits, endianness, packet_length.as_ref())),
             _ => None,
         }
     }
 
-    pub fn as_custom(&self) -> Option<(&[syn::Ident], bool)> {
+    pub fn as_custom(&self) -> Option<&[syn::Ident]> {
         match self.kind {
-            Kind::Custom {
-                ref construct_with,
-                is_payload,
-            } => Some((construct_with, is_payload)),
+            Kind::Custom { ref construct_with } => Some(construct_with),
             _ => None,
         }
     }
 
     pub fn is_payload(&self) -> bool {
         match self.kind {
-            Kind::Vec { is_payload, .. } => is_payload,
+            Kind::Vec {
+                ref packet_length, ..
+            } => packet_length.is_none(),
+            Kind::Custom {
+                ref construct_with, ..
+            } => construct_with.is_empty(),
             _ => false,
         }
     }
@@ -245,7 +232,6 @@ impl Field {
                 ref item_ty,
                 item_bits,
                 endianness,
-                is_payload,
                 ref packet_length,
             } => self.generate_vec_accessor(
                 mutable,
@@ -253,13 +239,11 @@ impl Field {
                 item_ty,
                 item_bits,
                 endianness,
-                is_payload,
-                packet_length,
+                packet_length.as_ref(),
             ),
-            Kind::Custom {
-                ref construct_with,
-                is_payload,
-            } => self.generate_custom_accessor(bits_offset, construct_with, is_payload),
+            Kind::Custom { ref construct_with } => {
+                self.generate_custom_accessor(bits_offset, construct_with)
+            }
         }
     }
 
@@ -298,16 +282,13 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         item_size: usize,
         endianness: Option<Endianness>,
-        is_payload: bool,
-        packet_length: &Option<TokenStream>,
+        packet_length: Option<&TokenStream>,
     ) -> TokenStream {
         let current_offset = (*bits_offset + 7) / 8;
 
-        let raw_accessors = if !is_payload {
-            Some(self.generate_vec_raw_accessors(mutable, current_offset))
-        } else {
-            None
-        };
+        let raw_accessors = packet_length.map(|packet_length| {
+            self.generate_vec_raw_accessors(mutable, current_offset, packet_length)
+        });
 
         if let Some((bits_size, endianness)) = parse_primitive(&inner_ty) {
             let vec_primitive_accessor = self.generate_vec_primitive_accessor(
@@ -315,6 +296,7 @@ This field is always stored in {} endianness within the struct, but this accesso
                 &inner_ty,
                 bits_size,
                 endianness,
+                packet_length,
             );
 
             quote_spanned! { self.span =>
@@ -329,7 +311,12 @@ This field is always stored in {} endianness within the struct, but this accesso
         }
     }
 
-    fn generate_vec_raw_accessors(&self, mutable: bool, current_offset: usize) -> TokenStream {
+    fn generate_vec_raw_accessors(
+        &self,
+        mutable: bool,
+        current_offset: usize,
+        packet_length: &TokenStream,
+    ) -> TokenStream {
         let field_name = &self.ident;
 
         let get_field_raw = {
@@ -346,7 +333,11 @@ This field is always stored in {} endianness within the struct, but this accesso
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn #get_field_raw(&self) -> &[u8] {
-                    &self.packet[#current_offset..]
+                    let off = #current_offset;
+                    let packet_length = #packet_length;
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    &self.packet[off..end]
                 }
             }
         };
@@ -365,7 +356,11 @@ This field is always stored in {} endianness within the struct, but this accesso
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn #get_field_raw_mut(&mut self) -> &mut [u8] {
-                    &mut self.packet[#current_offset..]
+                    let off = #current_offset;
+                    let packet_length = #packet_length;
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    &mut self.packet[off..end]
                 }
             })
         } else {
@@ -385,6 +380,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         bits_size: usize,
         endianness: Option<Endianness>,
+        packet_length: Option<&TokenStream>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -392,6 +388,17 @@ This field is always stored in {} endianness within the struct, but this accesso
             field_name
         );
         let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+        let packet = if let Some(packet_length) = packet_length {
+            quote! {
+                let packet_length = #packet_length;
+                let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                let packet = &self.packet[off..end];
+            }
+        } else {
+            quote! {
+                let packet = &self.packet[off..];
+            }
+        };
         let read_ops = if inner_ty == "u8" {
             quote! {
                 packet.to_vec()
@@ -401,7 +408,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             let read_ops = read_operations(0, bits_size, endianness, quote! { chunk });
 
             quote! {
-                packet.chunks(#item_size).map(|chunk| { #read_ops }).collect()
+                packet.chunks(off).map(|chunk| { #read_ops }).collect()
             }
         };
 
@@ -411,7 +418,9 @@ This field is always stored in {} endianness within the struct, but this accesso
             #[allow(trivial_numeric_casts)]
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #get_field(&self) -> Vec<#inner_ty> {
-                let packet = &self.packet[#current_offset..];
+                let off = #current_offset;
+
+                #packet
 
                 #read_ops
             }
@@ -422,7 +431,6 @@ This field is always stored in {} endianness within the struct, but this accesso
         &self,
         bits_offset: &mut usize,
         arg_types: &[syn::Ident],
-        is_payload: bool,
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
@@ -478,20 +486,17 @@ This field is always stored in {} endianness within the struct, but this accesso
                 ref item_ty,
                 item_bits,
                 endianness,
-                is_payload,
                 ref packet_length,
             } => self.generate_vec_primitive_mutator(
                 bits_offset,
                 item_ty,
                 item_bits,
                 endianness,
-                is_payload,
                 packet_length,
             ),
-            Kind::Custom {
-                ref construct_with,
-                is_payload,
-            } => self.generate_custom_mutator(bits_offset, construct_with, is_payload),
+            Kind::Custom { ref construct_with } => {
+                self.generate_custom_mutator(bits_offset, construct_with)
+            }
         }
     }
 
@@ -536,7 +541,6 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         bits_size: usize,
         endianness: Option<Endianness>,
-        is_payload: bool,
         packet_length: &Option<TokenStream>,
     ) -> TokenStream {
         let field_name = &self.ident;
@@ -546,6 +550,17 @@ This field is always stored in {} endianness within the struct, but this accesso
         );
         let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
         let current_offset = (*bits_offset + 7) / 8;
+        let packet = if let Some(packet_length) = packet_length {
+            quote! {
+                let packet_length = #packet_length;
+                let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                let packet = &mut self.packet[off..end];
+            }
+        } else {
+            quote! {
+                let packet = &mut self.packet[off..];
+            }
+        };
         let write_ops = if inner_ty == "u8" {
             quote! {
                 packet.copy_from_slice(vals)
@@ -574,7 +589,9 @@ This field is always stored in {} endianness within the struct, but this accesso
             #[allow(trivial_numeric_casts)]
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #set_field(&mut self, vals: &[#inner_ty]) {
-                let packet = &mut self.packet[#current_offset..];
+                let off = #current_offset;
+
+                #packet
 
                 #write_ops
             }
@@ -585,7 +602,6 @@ This field is always stored in {} endianness within the struct, but this accesso
         &self,
         bits_offset: &mut usize,
         arg_types: &[syn::Ident],
-        is_payload: bool,
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
@@ -893,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vec_field_with_short_item() {
+    fn test_payload_field_with_short_item() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
                 #[payload]
@@ -926,6 +942,325 @@ mod tests {
     }
 
     #[test]
+    fn test_vec_field_with_length() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[length = 8]
+                body: Vec<u8>,
+
+                #[length = "8"]
+                body: Vec<u8>,
+
+                #[length = "4+4"]
+                body: Vec<u8>,
+
+                #[length = "self.pkt_len/2"]
+                body: Vec<u8>,
+            }
+        };
+        let mut iter = fields.named.into_iter();
+
+        let mut bits_offset = 16;
+
+        // #[length = 8]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .unwrap(),
+                "8usize"
+            );
+
+            assert_eq!(
+                field.generate_accessor(true, &mut bits_offset).to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = 8usize;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = 8usize;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = 8usize;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+
+            assert_eq!(
+                field.generate_mutator(&mut bits_offset).to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = 8usize;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+        }
+        // #[length = "8"]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .unwrap(),
+                "8"
+            );
+
+            assert_eq!(
+                field.generate_accessor(true, &mut bits_offset).to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = 8;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = 8;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = 8;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+
+            assert_eq!(
+                field.generate_mutator(&mut bits_offset).to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = 8;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+        }
+        // #[length = "4+4"]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .unwrap(),
+                "4 + 4"
+            );
+
+            assert_eq!(
+                field.generate_accessor(true, &mut bits_offset).to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = 4 + 4;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = 4 + 4;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = 4 + 4;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+
+            assert_eq!(
+                field.generate_mutator(&mut bits_offset).to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = 4 + 4;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+        }
+        // #[length = "self.pkt_len/2"]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .unwrap(),
+                "self . pkt_len / 2"
+            );
+
+            assert_eq!(
+                field.generate_accessor(true, &mut bits_offset).to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = self.pkt_len / 2;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = self.pkt_len / 2;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = self.pkt_len / 2;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+
+            assert_eq!(
+                field.generate_mutator(&mut bits_offset).to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = self.pkt_len / 2;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+            assert_eq!(bits_offset, 16);
+        }
+    }
+
+    #[test]
     fn test_payload_field() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
@@ -938,16 +1273,15 @@ mod tests {
 
         assert_eq!(field.name(), "body");
         assert_eq!(
-            field.as_vec().map(
-                |(item_ty, item_bits, endianness, is_payload, packet_length)| (
+            field
+                .as_vec()
+                .map(|(item_ty, item_bits, endianness, packet_length)| (
                     item_ty.clone(),
                     item_bits,
                     endianness,
-                    is_payload,
                     packet_length.map(|s| s.to_string())
-                )
-            ),
-            Some((ident!("u8"), 8, Some(Endianness::Big), true, None))
+                )),
+            Some((ident!("u8"), 8, Some(Endianness::Big), None))
         );
 
         let mut bits_offset = 16;
@@ -960,7 +1294,8 @@ mod tests {
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Vec <u8> {
-                    let packet = &self.packet[2usize..];
+                    let off = 2usize;
+                    let packet = &self.packet[off..];
                     packet.to_vec()
                 }
             }.to_string()
@@ -975,7 +1310,8 @@ mod tests {
                #[allow(trivial_numeric_casts)]
                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                pub fn set_body(&mut self, vals: &[u8]) {
-                   let packet = &mut self.packet[2usize..];
+                   let off = 2usize;
+                   let packet = &mut self.packet[off..];
                    packet.copy_from_slice(vals)
                }
             }.to_string()
@@ -996,16 +1332,15 @@ mod tests {
 
         assert_eq!(field.name(), "body");
         assert_eq!(
-            field.as_vec().map(
-                |(item_ty, item_bits, endianness, is_payload, packet_length)| (
+            field
+                .as_vec()
+                .map(|(item_ty, item_bits, endianness, packet_length)| (
                     item_ty.clone(),
                     item_bits,
                     endianness,
-                    is_payload,
                     packet_length.map(|s| s.to_string())
-                )
-            ),
-            Some((ident!("u16"), 16, Some(Endianness::Big), true, None))
+                )),
+            Some((ident!("u16"), 16, Some(Endianness::Big), None))
         );
 
         let mut bits_offset = 16;
@@ -1018,8 +1353,9 @@ mod tests {
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Vec <u16> {
-                    let packet = &self.packet[2usize..];
-                    packet.chunks(2usize).map(|chunk| {
+                    let off = 2usize;
+                    let packet = &self.packet[off..];
+                    packet.chunks(off).map(|chunk| {
                         <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&chunk[0usize..])
                     }).collect()
                 }
@@ -1035,7 +1371,8 @@ mod tests {
                #[allow(trivial_numeric_casts)]
                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                pub fn set_body(&mut self, vals: &[u16]) {
-                   let packet = &mut self.packet[2usize..];
+                   let off = 2usize;
+                   let packet = &mut self.packet[off..];
                    let buf = vals.iter().flat_map(|&v| {
                        let mut buf = vec![0u8; 2usize];
                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut buf[0usize..], v);
@@ -1068,10 +1405,7 @@ mod tests {
         let hardware_type = Field::parse(iter.next().unwrap()).unwrap();
 
         assert_eq!(hardware_type.name(), "hardware_type");
-        assert_eq!(
-            hardware_type.as_custom(),
-            Some((&[ident!("u16")][..], false))
-        );
+        assert_eq!(hardware_type.as_custom(), Some(&[ident!("u16")][..]));
 
         let mut bits_offset = 16;
 
@@ -1115,7 +1449,7 @@ mod tests {
         assert_eq!(sender_hw_addr.name(), "sender_hw_addr");
         assert_eq!(
             sender_hw_addr.as_custom(),
-            Some((
+            Some(
                 &[
                     ident!("u8"),
                     ident!("u8"),
@@ -1124,8 +1458,7 @@ mod tests {
                     ident!("u8"),
                     ident!("u8")
                 ][..],
-                false
-            ))
+            )
         );
 
         assert_eq!(
@@ -1178,7 +1511,7 @@ mod tests {
         let body = Field::parse(iter.next().unwrap()).unwrap();
 
         assert_eq!(body.name(), "body");
-        assert_eq!(body.as_custom(), Some((&[][..], true)));
+        assert_eq!(body.as_custom(), Some(&[][..]));
 
         assert_eq!(
             body.generate_accessor(false, &mut bits_offset).to_string(),

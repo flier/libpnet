@@ -73,10 +73,19 @@ impl Packet {
                 .map(Field::parse)
                 .collect::<Result<Vec<_>>>()?;
 
+            if fields.iter().rev().skip(1).any(|field| {
+                field
+                    .as_vec()
+                    .map(|(_, _, _, packet_length)| packet_length.is_none() && field.is_payload())
+                    .unwrap_or_default()
+            }) {
+                bail!("#[payload] must specify a #[length] or #[length_fn] attribute, unless it is the last field of a packet")
+            }
+
             match fields.iter().filter(|field| field.is_payload()).count() {
-                0 => bail!("#[packet]'s must contain a payload field"),
+                0 => bail!("#[packet] must contain a payload field"),
                 1 => Ok(Packet { ident, fields }),
-                _ => bail!("packet may not have multiple payloads"),
+                _ => bail!("#[packet] may not have multiple payloads"),
             }
         } else {
             bail!("{} all fields in a packet must be named", ident)
@@ -112,16 +121,8 @@ impl Packet {
 
         let new = self.generate_constructor_new(mutable);
         let owned = self.generate_constructor_owned(mutable);
-        let to_immutable = if mutable {
-            Some(self.generate_to_immutable())
-        } else {
-            None
-        };
-        let consume_to_immutable = if mutable {
-            Some(self.generate_consume_to_immutable())
-        } else {
-            None
-        };
+        let to_immutable = self.generate_to_immutable();
+        let consume_to_immutable = self.generate_consume_to_immutable();
         let minimum_packet_size = self.generate_minimum_packet_size((bits_offset + 7) / 8);
         let packet_size = self.generate_packet_size(0);
         let populate = if mutable {
@@ -325,5 +326,77 @@ and the underlying buffer will be dropped when the {0} is.",
 impl ToTokens for Packet {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         tokens.append_all(&[self.generate_packet(false), self.generate_packet(true)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_private_struct() {
+        let foo: syn::DeriveInput = parse_quote! {
+            #[packet]
+            struct Foo{
+                bar: Vec<u8>,
+            }
+        };
+
+        assert_eq!(
+            parse(foo).unwrap_err().to_string(),
+            "#[packet] structs/enums Foo must be public"
+        );
+    }
+
+    #[test]
+    fn test_payload_field_without_length_in_middle() {
+        let foo: syn::DeriveInput = parse_quote! {
+            #[packet]
+            pub struct Foo{
+                #[payload]
+                bar: Vec<u8>,
+
+                payload: Vec<u8>
+            }
+        };
+
+        assert_eq!(
+            parse(foo).unwrap_err().to_string(),
+            "variable length field must have #[length] or #[length_fn] attribute"
+        );
+    }
+
+    #[test]
+    fn test_packet_without_payload() {
+        let foo: syn::DeriveInput = parse_quote! {
+            #[packet]
+            pub struct Foo{
+                bar: u8
+            }
+        };
+
+        assert_eq!(
+            parse(foo).unwrap_err().to_string(),
+            "#[packet] must contain a payload field"
+        );
+    }
+
+    #[test]
+    fn test_packet_with_multi_payload() {
+        let foo: syn::DeriveInput = parse_quote! {
+            #[packet]
+            pub struct Foo{
+                #[payload]
+                foo: Bar,
+
+                #[payload]
+                bar: Vec<u8>,
+            }
+        };
+
+        assert_eq!(
+            parse(foo).unwrap_err().to_string(),
+            "#[packet] may not have multiple payloads"
+        );
     }
 }
