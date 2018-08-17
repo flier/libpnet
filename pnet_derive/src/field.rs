@@ -188,10 +188,6 @@ impl Field {
         }
     }
 
-    pub fn is_primitive(&self) -> bool {
-        self.as_primitive().is_some()
-    }
-
     pub fn as_vec(
         &self,
     ) -> Option<(
@@ -219,22 +215,11 @@ impl Field {
         }
     }
 
-    pub fn is_vec(&self) -> bool {
-        match self.kind {
-            Kind::Vec { .. } => true,
-            _ => false,
-        }
-    }
-
     pub fn as_custom(&self) -> Option<&[syn::Ident]> {
         match self.kind {
             Kind::Custom { ref construct_with } => Some(construct_with),
             _ => None,
         }
-    }
-
-    pub fn is_custom(&self) -> bool {
-        self.as_custom().is_some()
     }
 
     pub fn is_payload(&self) -> bool {
@@ -810,13 +795,12 @@ mod tests {
             vis: syn::Visibility::Inherited,
             ident: Some(ident!("foo")),
             colon_token: None,
-            ty: syn::parse_str("u8").unwrap(),
+            ty: parse_quote! { u8 },
         };
 
         let field = Field::parse(field).unwrap();
 
         assert_eq!(field.name(), "foo");
-        assert!(field.is_primitive());
         assert_eq!(field.as_primitive(), Some((8, Some(Endianness::Big))));
 
         let mut bits_offset = 0;
@@ -853,12 +837,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_field_with_unknown_attributes() {
-        let fields: syn::FieldsNamed = syn::parse_str(
-            "{
-            #[foo]
-            body: Vec<u16>,
-        }",
-        ).unwrap();
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[foo]
+                body: Vec<u16>,
+            }
+        };
 
         let _ = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
     }
@@ -866,12 +850,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_field_with_unsupport_type() {
-        let fields: syn::FieldsNamed = syn::parse_str(
-            "{
-            #[foo]
-            body: HashSet<u16>,
-        }",
-        ).unwrap();
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[foo]
+                body: HashSet<u16>,
+            }
+        };
 
         let _ = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
     }
@@ -884,7 +868,7 @@ mod tests {
             vis: syn::Visibility::Inherited,
             ident: Some(ident!("foo")),
             colon_token: None,
-            ty: syn::parse_str("Vec<u8>").unwrap(),
+            ty: parse_quote! { Vec<u8> },
         }).unwrap();
     }
 
@@ -896,7 +880,7 @@ mod tests {
             vis: syn::Visibility::Inherited,
             ident: Some(ident!("foo")),
             colon_token: None,
-            ty: syn::parse_str("Vec<Vec<u8>>").unwrap(),
+            ty: parse_quote! { Vec<Vec<u8>> },
         }).unwrap();
     }
 
@@ -908,23 +892,22 @@ mod tests {
             vis: syn::Visibility::Inherited,
             ident: Some(ident!("foo")),
             colon_token: None,
-            ty: syn::parse_str("Vec<u4>").unwrap(),
+            ty: parse_quote! { Vec<u4> },
         }).unwrap();
     }
 
     #[test]
     fn test_payload_field() {
-        let fields: syn::FieldsNamed = syn::parse_str(
-            "{
-            #[payload]
-            body: Vec<u8>,
-        }",
-        ).unwrap();
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[payload]
+                body: Vec<u8>,
+            }
+        };
 
         let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
 
         assert_eq!(field.name(), "body");
-        assert!(field.is_vec());
         assert_eq!(
             field.as_vec().map(
                 |(item_ty, item_bits, endianness, is_payload, packet_length)| (
@@ -973,17 +956,16 @@ mod tests {
 
     #[test]
     fn test_payload_field_with_u16() {
-        let fields: syn::FieldsNamed = syn::parse_str(
-            "{
-            #[payload]
-            body: Vec<u16>,
-        }",
-        ).unwrap();
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[payload]
+                body: Vec<u16>,
+            }
+        };
 
         let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
 
         assert_eq!(field.name(), "body");
-        assert!(field.is_vec());
         assert_eq!(
             field.as_vec().map(
                 |(item_ty, item_bits, endianness, is_payload, packet_length)| (
@@ -1039,5 +1021,122 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_field() {}
+    fn test_custom_field_with_construct_with() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[construct_with(u16)]
+                pub hardware_type: ArpHardwareType,
+
+                #[construct_with(u8, u8, u8, u8, u8, u8)]
+                pub sender_hw_addr: MacAddr,
+            }
+        };
+
+        let mut iter = fields.named.into_iter();
+        let hardware_type = Field::parse(iter.next().unwrap()).unwrap();
+
+        assert_eq!(hardware_type.name(), "hardware_type");
+        assert_eq!(hardware_type.as_custom(), Some(&[ident!("u16")][..]));
+
+        let mut bits_offset = 16;
+
+        assert_eq!(
+            hardware_type
+                .generate_accessor(false, &mut bits_offset)
+                .to_string(),
+            quote!{
+                #[doc="Get the value of the hardware_type field" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_hardware_type(&self) -> ArpHardwareType {
+                    ArpHardwareType::new(
+                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[2usize..])
+                    )
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 32);
+
+        assert_eq!(
+            hardware_type.generate_mutator(&mut bits_offset).to_string(),
+            quote!{
+                #[doc="Set the value of the hardware_type field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
+                    use pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut self.packet[4usize..], vals.0usize);
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 48);
+
+        let sender_hw_addr = Field::parse(iter.next().unwrap()).unwrap();
+
+        assert_eq!(sender_hw_addr.name(), "sender_hw_addr");
+        assert_eq!(
+            sender_hw_addr.as_custom(),
+            Some(
+                &[
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8")
+                ][..]
+            )
+        );
+
+        assert_eq!(
+            sender_hw_addr
+                .generate_accessor(false, &mut bits_offset)
+                .to_string(),
+            quote!{
+                #[doc="Get the value of the sender_hw_addr field" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_sender_hw_addr(&self) -> MacAddr {
+                    MacAddr::new(
+                        self.packet[6usize],
+                        self.packet[7usize],
+                        self.packet[8usize],
+                        self.packet[9usize],
+                        self.packet[10usize],
+                        self.packet[11usize]
+                    )
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 96);
+
+        assert_eq!(
+            sender_hw_addr
+                .generate_mutator(&mut bits_offset)
+                .to_string(),
+            quote!{
+                #[doc="Set the value of the sender_hw_addr field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
+                    use pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+
+                    self.packet[12usize] = vals.0usize;
+                    self.packet[13usize] = vals.1usize;
+                    self.packet[14usize] = vals.2usize;
+                    self.packet[15usize] = vals.3usize;
+                    self.packet[16usize] = vals.4usize;
+                    self.packet[17usize] = vals.5usize;
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 144);
+    }
 }

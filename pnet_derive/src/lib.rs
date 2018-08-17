@@ -10,6 +10,7 @@ extern crate quote;
 extern crate byteorder;
 extern crate itertools;
 extern crate regex;
+#[macro_use]
 extern crate syn;
 
 #[cfg(test)]

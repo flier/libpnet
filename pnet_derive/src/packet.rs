@@ -300,7 +300,7 @@ and the underlying buffer will be dropped when the {0} is.",
             let field_name = &field.name();
             let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
 
-            if field.is_vec() {
+            if field.as_vec().is_some() {
                 quote! {
                     self.#set_field(&packet.#field_name);
                 }
