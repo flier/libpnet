@@ -24,7 +24,7 @@ pub fn parse(input: syn::DeriveInput) -> Result<Vec<Packet>> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
     ident: syn::Ident,
     fields: Vec<Field>,
@@ -318,6 +318,19 @@ and the underlying buffer will be dropped when the {0} is.",
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn populate(&mut self, packet: &#base_name) {
                 #(#set_fields)*
+            }
+        }
+    }
+
+    fn generaete_packet_size(&self, mutable: bool, size: usize) -> TokenStream {
+        let packet_name = self.packet_name(mutable);
+
+        quote! {
+            impl<'a> ::pnet_macros_support::packet::PacketSize for #packet_name<'a> {
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                fn packet_size(&self) -> usize {
+                    #size
+                }
             }
         }
     }

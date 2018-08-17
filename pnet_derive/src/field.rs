@@ -1,18 +1,36 @@
 use proc_macro2::{Span, TokenStream};
-use quote::ToTokens;
+use quote::{ToTokens, TokenStreamExt};
 use syn::{self, spanned::Spanned};
 
 use types::{parse_primitive, Endianness, Result};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     ident: syn::Ident,
     ty: syn::Type,
-    span: Span,
     kind: Kind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum PacketLength {
+    Size(usize),
+    Expr(syn::Expr),
+    Func(syn::Ident),
+}
+
+impl ToTokens for PacketLength {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            PacketLength::Size(size) => size.to_tokens(tokens),
+            PacketLength::Expr(expr) => expr.to_tokens(tokens),
+            PacketLength::Func(func) => tokens.append_all(quote! {
+                #func(&self.to_immutable())
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum Kind {
     Primitive {
         bits: usize,
@@ -22,7 +40,7 @@ enum Kind {
         item_ty: syn::Ident,
         item_bits: usize,
         endianness: Option<Endianness>,
-        packet_length: Option<TokenStream>,
+        packet_length: Option<PacketLength>,
     },
     Custom {
         construct_with: Vec<syn::Ident>,
@@ -31,7 +49,6 @@ enum Kind {
 
 impl Field {
     pub fn parse(field: syn::Field) -> Result<Self> {
-        let field_span = field.span();
         let field_name = field
             .ident
             .ok_or_else(|| format_err!("all fields in a packet must be named"))?;
@@ -76,12 +93,12 @@ impl Field {
                         syn::Lit::Str(lit) => {
                             let expr: syn::Expr = syn::parse_str(&lit.value())?;
 
-                            Some(quote!{ #expr })
+                            Some(PacketLength::Expr(expr))
                         }
                         syn::Lit::Int(lit) => {
                             let n = lit.value() as usize;
 
-                            Some(quote!{ #n })
+                            Some(PacketLength::Size(n))
                         }
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     };
@@ -95,9 +112,7 @@ impl Field {
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     };
 
-                    packet_length = Some(quote! {
-                        #length_fn(&self.to_immutable())
-                    });
+                    packet_length = Some(PacketLength::Func(length_fn));
                 }
                 _ => bail!("unknown attribute {}", attr.into_token_stream()),
             }
@@ -172,7 +187,6 @@ impl Field {
             .map(|kind| Field {
                 ident: field_name,
                 ty: field_ty,
-                span: field_span,
                 kind,
             })
     }
@@ -185,6 +199,10 @@ impl Field {
         &self.ty
     }
 
+    pub fn span(&self) -> Span {
+        self.ident.span()
+    }
+
     pub fn as_primitive(&self) -> Option<(usize, Option<Endianness>)> {
         match self.kind {
             Kind::Primitive { bits, endianness } => Some((bits, endianness)),
@@ -192,7 +210,14 @@ impl Field {
         }
     }
 
-    pub fn as_vec(&self) -> Option<(&syn::Ident, usize, Option<Endianness>, Option<&TokenStream>)> {
+    pub fn as_vec(
+        &self,
+    ) -> Option<(
+        &syn::Ident,
+        usize,
+        Option<Endianness>,
+        Option<&PacketLength>,
+    )> {
         match self.kind {
             Kind::Vec {
                 ref item_ty,
@@ -264,7 +289,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 
         *bits_offset += bits_size;
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -282,7 +307,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         item_size: usize,
         endianness: Option<Endianness>,
-        packet_length: Option<&TokenStream>,
+        packet_length: Option<&PacketLength>,
     ) -> TokenStream {
         let current_offset = (*bits_offset + 7) / 8;
 
@@ -299,13 +324,13 @@ This field is always stored in {} endianness within the struct, but this accesso
                 packet_length,
             );
 
-            quote_spanned! { self.span =>
+            quote_spanned! { self.span() =>
                 #raw_accessors
 
                 #vec_primitive_accessor
             }
         } else {
-            quote_spanned! { self.span =>
+            quote_spanned! { self.span() =>
                 #raw_accessors
             }
         }
@@ -315,7 +340,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         &self,
         mutable: bool,
         current_offset: usize,
-        packet_length: &TokenStream,
+        packet_length: &PacketLength,
     ) -> TokenStream {
         let field_name = &self.ident;
 
@@ -327,7 +352,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             let get_field_raw =
                 syn::Ident::new(&format!("get_{}_raw", field_name), Span::call_site());
 
-            quote_spanned! { self.span =>
+            quote_spanned! { self.span() =>
                 #[doc = #comment]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
@@ -350,7 +375,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             let get_field_raw_mut =
                 syn::Ident::new(&format!("get_{}_raw_mut", field_name), Span::call_site());
 
-            Some(quote_spanned! { self.span =>
+            Some(quote_spanned! { self.span() =>
                 #[doc = #comment]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
@@ -367,7 +392,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             None
         };
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #get_field_raw
 
             #get_field_raw_mut
@@ -380,7 +405,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         bits_size: usize,
         endianness: Option<Endianness>,
-        packet_length: Option<&TokenStream>,
+        packet_length: Option<&PacketLength>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -412,7 +437,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             }
         };
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -466,7 +491,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 
         let comment = format!("Get the value of the {} field", field_name);
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -524,7 +549,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 
         *bits_offset += bits_size;
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -541,7 +566,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         bits_size: usize,
         endianness: Option<Endianness>,
-        packet_length: &Option<TokenStream>,
+        packet_length: &Option<PacketLength>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -583,7 +608,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             }
         };
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -641,7 +666,7 @@ This field is always stored in {} endianness within the struct, but this accesso
             }
         };
 
-        quote_spanned! { self.span =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -969,7 +994,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "8usize"
             );
@@ -1043,7 +1068,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "8"
             );
@@ -1117,7 +1142,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "4 + 4"
             );
@@ -1191,7 +1216,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .and_then(|(_, _, _, packet_length)| packet_length.map(|expr| expr.to_string()))
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "self . pkt_len / 2"
             );
@@ -1273,15 +1298,8 @@ mod tests {
 
         assert_eq!(field.name(), "body");
         assert_eq!(
-            field
-                .as_vec()
-                .map(|(item_ty, item_bits, endianness, packet_length)| (
-                    item_ty.clone(),
-                    item_bits,
-                    endianness,
-                    packet_length.map(|s| s.to_string())
-                )),
-            Some((ident!("u8"), 8, Some(Endianness::Big), None))
+            field.as_vec(),
+            Some((&ident!("u8"), 8, Some(Endianness::Big), None))
         );
 
         let mut bits_offset = 16;
@@ -1332,15 +1350,8 @@ mod tests {
 
         assert_eq!(field.name(), "body");
         assert_eq!(
-            field
-                .as_vec()
-                .map(|(item_ty, item_bits, endianness, packet_length)| (
-                    item_ty.clone(),
-                    item_bits,
-                    endianness,
-                    packet_length.map(|s| s.to_string())
-                )),
-            Some((ident!("u16"), 16, Some(Endianness::Big), None))
+            field.as_vec(),
+            Some((&ident!("u16"), 16, Some(Endianness::Big), None))
         );
 
         let mut bits_offset = 16;
