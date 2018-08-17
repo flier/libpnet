@@ -2,36 +2,18 @@ use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, TokenStreamExt};
 use syn::{self, spanned::Spanned};
 
-use types::{parse_primitive, Endianness, Result};
+use gen::{read_operations, write_operations};
+use types::{parse_primitive, Endianness, Length, Result};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
-    ident: syn::Ident,
-    ty: syn::Type,
-    kind: Kind,
+    pub ident: syn::Ident,
+    pub ty: syn::Type,
+    pub kind: Kind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum PacketLength {
-    Size(usize),
-    Expr(syn::Expr),
-    Func(syn::Ident),
-}
-
-impl ToTokens for PacketLength {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        match self {
-            PacketLength::Size(size) => size.to_tokens(tokens),
-            PacketLength::Expr(expr) => expr.to_tokens(tokens),
-            PacketLength::Func(func) => tokens.append_all(quote! {
-                #func(&self.to_immutable())
-            }),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum Kind {
+pub enum Kind {
     Primitive {
         bits: usize,
         endianness: Option<Endianness>,
@@ -40,7 +22,7 @@ enum Kind {
         item_ty: syn::Ident,
         item_bits: usize,
         endianness: Option<Endianness>,
-        packet_length: Option<PacketLength>,
+        packet_length: Option<Length>,
     },
     Custom {
         construct_with: Vec<syn::Ident>,
@@ -93,12 +75,12 @@ impl Field {
                         syn::Lit::Str(lit) => {
                             let expr: syn::Expr = syn::parse_str(&lit.value())?;
 
-                            Some(PacketLength::Expr(expr))
+                            Some(Length::Expr(expr))
                         }
                         syn::Lit::Int(lit) => {
                             let n = lit.value() as usize;
 
-                            Some(PacketLength::Size(n))
+                            Some(Length::Bits(n))
                         }
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     };
@@ -112,7 +94,7 @@ impl Field {
                         _ => bail!("expected attribute to be a string `{} = \"...\"`", ident),
                     };
 
-                    packet_length = Some(PacketLength::Func(length_fn));
+                    packet_length = Some(Length::Func(length_fn));
                 }
                 _ => bail!("unknown attribute {}", attr.into_token_stream()),
             }
@@ -203,6 +185,38 @@ impl Field {
         self.ident.span()
     }
 
+    pub fn bits(&self) -> Option<Length> {
+        match self.kind {
+            Kind::Primitive { bits, .. } => Some(Length::Bits(bits)),
+            Kind::Vec {
+                ref packet_length, ..
+            } => packet_length.clone(),
+            Kind::Custom { ref construct_with } => Some(Length::Bits(
+                construct_with
+                    .iter()
+                    .flat_map(|ty| parse_primitive(ty).map(|(bits, _)| bits))
+                    .sum(),
+            )),
+        }
+    }
+
+    pub fn len(&self) -> Option<Length> {
+        match self.kind {
+            Kind::Primitive { bits, .. } => Some(Length::Bits(bits)),
+            Kind::Vec { .. } => {
+                let field_name = self.name();
+
+                Some(Length::Expr(parse_quote!{ self.packet.#field_name.len() }))
+            }
+            Kind::Custom { ref construct_with } => Some(Length::Bits(
+                construct_with
+                    .iter()
+                    .flat_map(|ty| parse_primitive(ty).map(|(bits, _)| bits))
+                    .sum(),
+            )),
+        }
+    }
+
     pub fn as_primitive(&self) -> Option<(usize, Option<Endianness>)> {
         match self.kind {
             Kind::Primitive { bits, endianness } => Some((bits, endianness)),
@@ -210,14 +224,7 @@ impl Field {
         }
     }
 
-    pub fn as_vec(
-        &self,
-    ) -> Option<(
-        &syn::Ident,
-        usize,
-        Option<Endianness>,
-        Option<&PacketLength>,
-    )> {
+    pub fn as_vec(&self) -> Option<(&syn::Ident, usize, Option<Endianness>, Option<&Length>)> {
         match self.kind {
             Kind::Vec {
                 ref item_ty,
@@ -307,7 +314,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         item_size: usize,
         endianness: Option<Endianness>,
-        packet_length: Option<&PacketLength>,
+        packet_length: Option<&Length>,
     ) -> TokenStream {
         let current_offset = (*bits_offset + 7) / 8;
 
@@ -340,7 +347,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         &self,
         mutable: bool,
         current_offset: usize,
-        packet_length: &PacketLength,
+        packet_length: &Length,
     ) -> TokenStream {
         let field_name = &self.ident;
 
@@ -405,7 +412,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         bits_size: usize,
         endianness: Option<Endianness>,
-        packet_length: Option<&PacketLength>,
+        packet_length: Option<&Length>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -566,7 +573,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         inner_ty: &syn::Ident,
         bits_size: usize,
         endianness: Option<Endianness>,
-        packet_length: &Option<PacketLength>,
+        packet_length: &Option<Length>,
     ) -> TokenStream {
         let field_name = &self.ident;
         let comment = format!(
@@ -682,105 +689,6 @@ This field is always stored in {} endianness within the struct, but this accesso
     }
 }
 
-fn read_operations<T: ToTokens>(
-    bits_offset: usize,
-    bits: usize,
-    endianness: Option<Endianness>,
-    packet: T,
-) -> TokenStream {
-    if bits_offset % 8 == 0 && bits % 8 == 0 && bits <= 64 {
-        let bytes_offset = bits_offset / 8;
-        let endianness_name = syn::Ident::new(
-            match endianness {
-                Some(Endianness::Little) => "LittenEndia",
-                Some(Endianness::Big) => "BigEndian",
-                None => "NativeEndian",
-            },
-            Span::call_site(),
-        );
-
-        match bits {
-            8 => quote! {
-                #packet[#bytes_offset]
-            },
-            16 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u16(&#packet[#bytes_offset..])
-            },
-            24 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u24(&#packet[#bytes_offset..])
-            },
-            32 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u32(&#packet[#bytes_offset..])
-            },
-            48 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u48(&#packet[#bytes_offset..])
-            },
-            64 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u64(&#packet[#bytes_offset..])
-            },
-            _ => {
-                let bytes = bits / 8;
-
-                quote!{
-                    <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_uint(&#packet[#bytes_offset..], #bytes)
-                }
-            }
-        }
-    } else {
-        unimplemented!()
-    }
-}
-
-fn write_operations<T: ToTokens, V: ToTokens>(
-    bits_offset: usize,
-    bits: usize,
-    endianness: Option<Endianness>,
-    packet: T,
-    val: V,
-) -> TokenStream {
-    if bits_offset % 8 == 0 && bits % 8 == 0 && bits <= 64 {
-        let bytes_offset = bits_offset / 8;
-        let endianness_name = syn::Ident::new(
-            match endianness {
-                Some(Endianness::Little) => "LittenEndian",
-                Some(Endianness::Big) => "BigEndian",
-                None => "NativeEndian",
-            },
-            Span::call_site(),
-        );
-
-        match bits {
-            8 => quote! {
-                #packet[#bytes_offset] = #val;
-            },
-            16 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u16(&mut #packet[#bytes_offset..], #val);
-            },
-            24 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u24(&mut #packet[#bytes_offset..], #val);
-            },
-            32 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u32(&mut #packet[#bytes_offset..], #val);
-            },
-            48 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u48(&mut #packet[#bytes_offset..], #val);
-            },
-            64 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u64(&mut #packet[#bytes_offset..], #val);
-            },
-            _ => {
-                let bytes = bits / 8;
-
-                quote!{
-                    <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bytes, #val);
-                }
-            }
-        }
-    } else {
-        unimplemented!()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,52 +700,6 @@ mod tests {
         ($name:expr, $span:expr) => {
             ::syn::Ident::new($name, $span)
         };
-    }
-
-    #[test]
-    fn test_read_operations() {
-        let read_ops = [
-            (0, 8, Some(Endianness::Little), quote! { packet[0usize] }),
-            (8, 16, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&packet[1usize..]) }),
-            (16, 24, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u24(&packet[2usize..]) }),
-            (24, 32, Some(Endianness::Little), quote! { <::byteorder::LittenEndia as ::byteorder::ByteOrder>::read_u32(&packet[3usize..]) }),
-            (32, 48, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u48(&packet[4usize..]) }),
-            (40, 64, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u64(&packet[5usize..]) }),
-            (48, 40, Some(Endianness::Little), quote! { <::byteorder::LittenEndia as ::byteorder::ByteOrder>::read_uint(&packet[6usize..], 5usize) }),
-        ];
-
-        for &(bits_offset, bits, endianness, ref code) in &read_ops {
-            assert_eq!(
-                read_operations(bits_offset, bits, endianness, quote! { packet }).to_string(),
-                code.to_string()
-            );
-        }
-    }
-
-    #[test]
-    fn test_write_operations() {
-        let write_ops = [
-            (0, 8, Some(Endianness::Little), quote! { packet[0usize] = val; }),
-            (8, 16, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut packet[1usize..], val); }),
-            (16, 24, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u24(&mut packet[2usize..], val); }),
-            (24, 32, Some(Endianness::Little), quote! { <::byteorder::LittenEndian as ::byteorder::ByteOrder>::write_u32(&mut packet[3usize..], val); }),
-            (32, 48, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u48(&mut packet[4usize..], val); }),
-            (40, 64, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u64(&mut packet[5usize..], val); }),
-            (48, 40, Some(Endianness::Little), quote! { <::byteorder::LittenEndian as ::byteorder::ByteOrder>::write_uint(&mut packet[6usize..], 5usize, val); }),
-        ];
-
-        for &(bits_offset, bits, endianness, ref code) in &write_ops {
-            assert_eq!(
-                write_operations(
-                    bits_offset,
-                    bits,
-                    endianness,
-                    quote! { packet },
-                    quote! { val }
-                ).to_string(),
-                code.to_string()
-            );
-        }
     }
 
     #[test]

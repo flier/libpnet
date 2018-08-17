@@ -18,6 +18,7 @@ extern crate syn;
 extern crate lazy_static;
 
 mod field;
+mod gen;
 mod packet;
 mod types;
 
