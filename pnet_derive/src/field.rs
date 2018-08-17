@@ -27,6 +27,7 @@ enum Kind {
     },
     Custom {
         construct_with: Vec<syn::Ident>,
+        is_payload: bool,
     },
 }
 
@@ -158,8 +159,11 @@ impl Field {
             }
             _ => None,
         }.or_else(|| {
-            if !construct_with.is_empty() {
-                Some(Kind::Custom { construct_with })
+            if !construct_with.is_empty() || is_payload {
+                Some(Kind::Custom {
+                    construct_with,
+                    is_payload,
+                })
             } else {
                 None
             }
@@ -215,9 +219,12 @@ impl Field {
         }
     }
 
-    pub fn as_custom(&self) -> Option<&[syn::Ident]> {
+    pub fn as_custom(&self) -> Option<(&[syn::Ident], bool)> {
         match self.kind {
-            Kind::Custom { ref construct_with } => Some(construct_with),
+            Kind::Custom {
+                ref construct_with,
+                is_payload,
+            } => Some((construct_with, is_payload)),
             _ => None,
         }
     }
@@ -249,9 +256,10 @@ impl Field {
                 is_payload,
                 packet_length,
             ),
-            Kind::Custom { ref construct_with } => {
-                self.generate_custom_accessor(bits_offset, construct_with)
-            }
+            Kind::Custom {
+                ref construct_with,
+                is_payload,
+            } => self.generate_custom_accessor(bits_offset, construct_with, is_payload),
         }
     }
 
@@ -414,6 +422,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         &self,
         bits_offset: &mut usize,
         arg_types: &[syn::Ident],
+        is_payload: bool,
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
@@ -479,9 +488,10 @@ This field is always stored in {} endianness within the struct, but this accesso
                 is_payload,
                 packet_length,
             ),
-            Kind::Custom { ref construct_with } => {
-                self.generate_custom_mutator(bits_offset, construct_with)
-            }
+            Kind::Custom {
+                ref construct_with,
+                is_payload,
+            } => self.generate_custom_mutator(bits_offset, construct_with, is_payload),
         }
     }
 
@@ -575,6 +585,7 @@ This field is always stored in {} endianness within the struct, but this accesso
         &self,
         bits_offset: &mut usize,
         arg_types: &[syn::Ident],
+        is_payload: bool,
     ) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
@@ -1047,6 +1058,9 @@ mod tests {
 
                 #[construct_with(u8, u8, u8, u8, u8, u8)]
                 pub sender_hw_addr: MacAddr,
+
+                #[payload]
+                pub body: Body,
             }
         };
 
@@ -1054,7 +1068,10 @@ mod tests {
         let hardware_type = Field::parse(iter.next().unwrap()).unwrap();
 
         assert_eq!(hardware_type.name(), "hardware_type");
-        assert_eq!(hardware_type.as_custom(), Some(&[ident!("u16")][..]));
+        assert_eq!(
+            hardware_type.as_custom(),
+            Some((&[ident!("u16")][..], false))
+        );
 
         let mut bits_offset = 16;
 
@@ -1098,7 +1115,7 @@ mod tests {
         assert_eq!(sender_hw_addr.name(), "sender_hw_addr");
         assert_eq!(
             sender_hw_addr.as_custom(),
-            Some(
+            Some((
                 &[
                     ident!("u8"),
                     ident!("u8"),
@@ -1106,8 +1123,9 @@ mod tests {
                     ident!("u8"),
                     ident!("u8"),
                     ident!("u8")
-                ][..]
-            )
+                ][..],
+                false
+            ))
         );
 
         assert_eq!(
@@ -1152,6 +1170,42 @@ mod tests {
                     self.packet[15usize] = vals.3usize;
                     self.packet[16usize] = vals.4usize;
                     self.packet[17usize] = vals.5usize;
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 144);
+
+        let body = Field::parse(iter.next().unwrap()).unwrap();
+
+        assert_eq!(body.name(), "body");
+        assert_eq!(body.as_custom(), Some((&[][..], true)));
+
+        assert_eq!(
+            body.generate_accessor(false, &mut bits_offset).to_string(),
+            quote!{
+                #[doc="Get the value of the body field" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Body {
+                    Body::new(&self.packet[18usize..])
+                }
+            }.to_string()
+        );
+        assert_eq!(bits_offset, 144);
+
+        assert_eq!(
+            body.generate_mutator(&mut bits_offset).to_string(),
+            quote!{
+                #[doc="Set the value of the body field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn set_body(&mut self, val: Body) {
+                    use pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+
+                    self.packet[18usize..18usize + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
                 }
             }.to_string()
         );
