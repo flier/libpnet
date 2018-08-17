@@ -40,10 +40,6 @@ pub fn parse_primitive(ty: &syn::Ident) -> Option<(usize, Option<Endianness>)> {
         _ => return None,
     };
 
-    if endianess.is_some() && size < 8 {
-        panic!("endianness must be specified for types of size >= 8")
-    }
-
     Some((size, endianess))
 }
 

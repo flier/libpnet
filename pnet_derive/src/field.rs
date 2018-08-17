@@ -790,15 +790,13 @@ mod tests {
 
     #[test]
     fn test_primitive_field() {
-        let field = syn::Field {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            ident: Some(ident!("foo")),
-            colon_token: None,
-            ty: parse_quote! { u8 },
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: u8,
+            }
         };
 
-        let field = Field::parse(field).unwrap();
+        let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
 
         assert_eq!(field.name(), "foo");
         assert_eq!(field.as_primitive(), Some((8, Some(Endianness::Big))));
@@ -835,7 +833,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_field_with_unknown_attributes() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
@@ -844,56 +841,77 @@ mod tests {
             }
         };
 
-        let _ = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "unknown attribute # [ foo ]"
+        );
     }
 
     #[test]
-    #[should_panic]
-    fn test_field_with_unsupport_type() {
+    fn test_vec_field_without_length() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
-                #[foo]
+                foo: Vec<u8>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "variable length field must have #[length] or #[length_fn] attribute"
+        );
+    }
+
+    #[test]
+    fn test_vec_field_with_vec_item() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: Vec<Vec<u8>>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "non-primitive field types must specify #[construct_with]"
+        );
+    }
+
+    #[test]
+    fn test_vec_field_with_short_item() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[payload]
+                foo: Vec<u4>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "variable length fields must align to byte"
+        );
+    }
+
+    #[test]
+    fn test_custom_field_without_construct_with() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
                 body: HashSet<u16>,
             }
         };
 
-        let _ = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_vec_field_without_length() {
-        let _ = Field::parse(syn::Field {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            ident: Some(ident!("foo")),
-            colon_token: None,
-            ty: parse_quote! { Vec<u8> },
-        }).unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_vec_field_with_vec_item() {
-        let _ = Field::parse(syn::Field {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            ident: Some(ident!("foo")),
-            colon_token: None,
-            ty: parse_quote! { Vec<Vec<u8>> },
-        }).unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_vec_field_with_unalined_item() {
-        let _ = Field::parse(syn::Field {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            ident: Some(ident!("foo")),
-            colon_token: None,
-            ty: parse_quote! { Vec<u4> },
-        }).unwrap();
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "non-primitive field types must specify #[construct_with]"
+        );
     }
 
     #[test]
@@ -1021,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_field_with_construct_with() {
+    fn test_custom_field() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
                 #[construct_with(u16)]
