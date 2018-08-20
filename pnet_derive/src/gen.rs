@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 use std::iter::FromIterator;
-use std::ops::Deref;
+use std::ops::{Deref, Range, RangeFrom};
 
+use either::Either;
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, TokenStreamExt};
 use syn;
@@ -9,6 +10,15 @@ use syn;
 use field::{Field, Kind};
 use packet::Packet;
 use types::{parse_primitive, Endianness, Length, ToBytesOffset};
+
+macro_rules! ident {
+    ($name:expr) => {
+        ident!($name, ::proc_macro2::Span::call_site())
+    };
+    ($name:expr, $span:expr) => {
+        ::syn::Ident::new($name, $span)
+    };
+}
 
 pub trait Generator {
     fn tokens(&self) -> TokenStream;
@@ -70,6 +80,7 @@ impl<'a> PacketGenerator<'a> {
 impl<'a> Generator for PacketGenerator<'a> {
     fn tokens(&self) -> TokenStream {
         let packet_name = self.packet_name();
+        let mut payload_bounds = None;
 
         let (accessors, _) = self.packet.fields.iter().fold(
             (vec![], vec![]),
@@ -77,6 +88,19 @@ impl<'a> Generator for PacketGenerator<'a> {
                 accessors.push(FieldAccessor::new(field, self.mutable, &length_funcs).tokens());
                 if let Some(bits) = field.bits() {
                     length_funcs.push(bits)
+                }
+                if field.is_payload() {
+                    let start = length_funcs.to_vec();
+
+                    if let Some(field_length) = field.bits() {
+                        let mut end = start.clone();
+
+                        end.push(field_length);
+
+                        payload_bounds = Some(Either::Left(start..end))
+                    } else {
+                        payload_bounds = Some(Either::Right(start..))
+                    }
                 }
                 (accessors, length_funcs)
             },
@@ -113,6 +137,10 @@ impl<'a> Generator for PacketGenerator<'a> {
         let minimum_packet_size = MinimumPacketSize(self, &bits_length_funcs).tokens();
         let packet_size = PacketSize(self, &struct_length_funcs).tokens();
         let populate = Populate(self).tokens();
+        let impl_packet_trait = ImplPacketTrait {
+            generator: self,
+            payload_bounds: payload_bounds.expect("#[packet] must contain a payload field"),
+        }.tokens();
 
         quote! {
             impl<'a> #packet_name<'a> {
@@ -134,6 +162,8 @@ impl<'a> Generator for PacketGenerator<'a> {
 
                 #populate
             }
+
+            #impl_packet_trait
         }
     }
 }
@@ -316,6 +346,77 @@ impl<'a> Generator for Populate<'a> {
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn populate(&self, packet: &#base_name) {
                 #(#set_fields)*
+            }
+        }
+    }
+}
+
+struct ImplPacketTrait<'a> {
+    generator: &'a PacketGenerator<'a>,
+    payload_bounds: Either<Range<Vec<Length>>, RangeFrom<Vec<Length>>>,
+}
+
+impl<'a> Deref for ImplPacketTrait<'a> {
+    type Target = PacketGenerator<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.generator
+    }
+}
+
+impl<'a> Generator for ImplPacketTrait<'a> {
+    fn tokens(&self) -> TokenStream {
+        let packet_trait = ident!(if self.mutable {
+            "MutablePacket"
+        } else {
+            "Packet"
+        });
+        let packet_name = self.packet_name();
+        let packet_method = if self.mutable {
+            ident!("packet_mut")
+        } else {
+            ident!("packet")
+        };
+        let payload_method = if self.mutable {
+            ident!("payload_mut")
+        } else {
+            ident!("payload")
+        };
+        let mut_ = if self.mutable {
+            Some(ident!("mut"))
+        } else {
+            None
+        };
+
+        let (start_offset, end_offset) = self.payload_bounds.as_ref().either(
+            |Range { start, end }| {
+                let start_offset = start.as_slice().bytes_offset();
+                let end_offset = end.as_slice().bytes_offset();
+
+                (start_offset, Some(end_offset))
+            },
+            |RangeFrom { start }| {
+                let start_offset = start.as_slice().bytes_offset();
+
+                (start_offset, None)
+            },
+        );
+
+        quote! {
+            impl<'a> ::pnet_macros_support::packet:: #packet_trait for #packet_name<'a> {
+                #[inline]
+                fn #packet_method<'p>(&'p #mut_ self) -> &'p #mut_ [u8] { & #mut_ self.packet[..] }
+
+                #[inline]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                fn #payload_method<'p>(&'p #mut_ self) -> &'p #mut_ [u8] {
+                    let start = #start_offset;
+
+                    if _self.packet.len() <= start {
+                        return & #mut_ [];
+                    }
+                    & #mut_ _self.packet[start..#end_offset]
+                }
             }
         }
     }
@@ -998,15 +1099,6 @@ mod tests {
     use super::*;
     use packet;
 
-    macro_rules! ident {
-        ($name:expr) => {
-            ident!($name, ::proc_macro2::Span::call_site())
-        };
-        ($name:expr, $span:expr) => {
-            ::syn::Ident::new($name, $span)
-        };
-    }
-
     #[test]
     fn test_packet() {
         let input: syn::DeriveInput = parse_quote! {
@@ -1194,6 +1286,21 @@ mod tests {
                     self.set_body(&packet.body);
                 }
             }
+            impl<'a> ::pnet_macros_support::packet::Packet for FooPacket<'a> {
+                #[inline]
+                fn packet<'p>(&'p self) -> &'p [u8] {
+                    &self.packet[..]
+                }
+                #[inline]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                fn payload<'p>(&'p self) -> &'p [u8] {
+                    let start = 13usize;
+                    if _self.packet.len() <= start {
+                        return &[];
+                    }
+                    &_self.packet[start..]
+                }
+            }
             impl<'a> MutableFooPacket<'a> {
                 #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
@@ -1353,9 +1460,26 @@ mod tests {
                     self.set_body(&packet.body);
                 }
             }
+            impl<'a> ::pnet_macros_support::packet::MutablePacket for MutableFooPacket<'a> {
+                #[inline]
+                fn packet_mut<'p>(&'p mut self) -> &'p mut [u8] {
+                    &mut self.packet[..]
+                }
+                #[inline]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
+                    let start = 13usize;
+                    if _self.packet.len() <= start {
+                        return &mut [];
+                    }
+                    &mut _self.packet[start..]
+                }
+            }
         }.to_string();
 
-        let diffs = diff::chars(generated.as_str(), expected.as_str())
+        assert_eq!(generated, expected);
+
+        let mut diffs = diff::chars(generated.as_str(), expected.as_str())
             .into_iter()
             .enumerate()
             .filter(|(_, res)| {
@@ -1364,11 +1488,12 @@ mod tests {
                 } else {
                     true
                 }
-            })
-            .collect::<Vec<_>>();
+            });
 
-        assert!(diffs.is_empty(), "{}", {
-            let (off, ref res) = diffs.first().unwrap().clone();
+        let res = diffs.next();
+
+        assert!(res.is_none(), "{}", {
+            let (off, ref res) = res.unwrap();
 
             match res {
                 diff::Result::Left(_) => {

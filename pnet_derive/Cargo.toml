@@ -16,6 +16,7 @@ proc-macro = true
 
 [dependencies]
 failure = "0.1"
+either = "1.5"
 proc-macro2 = "0.4.2"
 quote = "0.6"
 syn = "0.14"
