@@ -1,5 +1,6 @@
 use std::fmt;
 use std::iter::once;
+use std::mem;
 use std::result::Result as StdResult;
 
 use failure::Error;
@@ -80,36 +81,41 @@ impl ToBytesOffset for usize {
 
 impl<'a> ToBytesOffset for &'a [Length] {
     fn bytes_offset(&self) -> TokenStream {
-        let offsets = reduce_offsets(self.iter()).collect::<Vec<_>>();
+        let mut offsets = reduce_offsets(self.iter());
 
-        match offsets.first() {
-            Some(Length::Bits(bits)) if offsets.len() == 1 => {
-                let offset = (bits + 7) / 8;
+        if let Some(Length::Bits(bits)) = offsets.next() {
+            let offset = (bits + 7) / 8;
 
-                return quote! { #offset };
-            }
-            _ => {}
+            return quote! { #offset #( + #offsets )* };
+        } else {
+            quote! { (( #(#offsets)+* ) + 7) / 8 }
         }
-
-        quote! { #(#offsets)+* }
     }
 }
 
 fn reduce_offsets<'a, I: IntoIterator<Item = &'a Length>>(lens: I) -> impl Iterator<Item = Length> {
-    let (length_funcs, total_bits) =
-        lens.into_iter()
-            .fold((vec![], 0), |(mut lens, total_bits), len| {
-                if let Length::Bits(bits) = len {
-                    (lens, total_bits + bits)
-                } else {
-                    lens.push(len.clone());
-                    (lens, total_bits)
-                }
-            });
+    let (length_funcs, total_bits, aligned) = lens.into_iter().fold(
+        (vec![], 0, false),
+        |(mut lens, total_bits, aligned), len| {
+            if let Length::Bits(bits) = len {
+                (lens, total_bits + bits, aligned)
+            } else {
+                lens.push(len.clone());
 
-    let total_len = Length::Bits(total_bits);
+                (lens, align_to::<u8>(total_bits), true)
+            }
+        },
+    );
+
+    let total_len = Length::Bits(align_to::<u8>(total_bits));
 
     once(total_len).chain(length_funcs.into_iter())
+}
+
+fn align_to<T>(bits: usize) -> usize {
+    let align = mem::size_of::<T>() * 8;
+
+    ((bits + align - 1) / align) * align
 }
 
 pub fn parse_primitive(ty: &syn::Ident) -> Option<(usize, Option<Endianness>)> {
@@ -169,14 +175,18 @@ mod tests {
         assert_eq!(18usize.bytes_offset().to_string(), "3usize");
 
         let funcs = &[
+            Length::Bits(1),
             Length::Bits(2),
-            Length::Bits(4),
             Length::Expr(parse_quote! { 1 + 2 * 3 }),
-            Length::Bits(8),
+            Length::Bits(4),
             Length::Func(ident!("foo")),
+            Length::Bits(8),
         ][..];
 
-        assert_eq!(funcs.bytes_offset().to_string(), "14usize + ( 1 + 2 * 3 ) + foo ( & self . to_immutable ( ) )");
+        assert_eq!(
+            funcs.bytes_offset().to_string(),
+            "3usize + ( 1 + 2 * 3 ) + foo ( & self . to_immutable ( ) )"
+        );
     }
 
     #[test]

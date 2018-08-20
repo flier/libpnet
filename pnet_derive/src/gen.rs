@@ -412,10 +412,10 @@ impl<'a> Generator for ImplPacketTrait<'a> {
                 fn #payload_method<'p>(&'p #mut_ self) -> &'p #mut_ [u8] {
                     let start = #start_offset;
 
-                    if _self.packet.len() <= start {
+                    if self.packet.len() <= start {
                         return & #mut_ [];
                     }
-                    & #mut_ _self.packet[start..#end_offset]
+                    & #mut_ self.packet[start..#end_offset]
                 }
             }
         }
@@ -1273,7 +1273,7 @@ mod tests {
                 #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
                 #[inline]
                 pub fn packet_size(_packet: &Foo) -> usize {
-                    104usize + (self.packet.body.len())
+                    13usize + (self.packet.body.len())
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
@@ -1295,10 +1295,10 @@ mod tests {
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn payload<'p>(&'p self) -> &'p [u8] {
                     let start = 13usize;
-                    if _self.packet.len() <= start {
+                    if self.packet.len() <= start {
                         return &[];
                     }
-                    &_self.packet[start..]
+                    &self.packet[start..]
                 }
             }
             impl<'a> MutableFooPacket<'a> {
@@ -1447,7 +1447,7 @@ mod tests {
                 #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
                 #[inline]
                 pub fn packet_size(_packet: &Foo) -> usize {
-                    104usize + (self.packet.body.len())
+                    13usize + (self.packet.body.len())
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
@@ -1469,10 +1469,10 @@ mod tests {
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
                     let start = 13usize;
-                    if _self.packet.len() <= start {
+                    if self.packet.len() <= start {
                         return &mut [];
                     }
-                    &mut _self.packet[start..]
+                    &mut self.packet[start..]
                 }
             }
         }.to_string();
