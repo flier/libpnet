@@ -42,11 +42,27 @@ impl ToTokens for Length {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         match self {
             Length::Bits(bits) => bits.to_tokens(tokens),
-            Length::Expr(expr) => expr.to_tokens(tokens),
-            Length::Func(func) => tokens.append_all(quote! {
-                #func(&self.to_immutable())
-            }),
+            Length::Expr(expr) => tokens.append_all(quote! { ( #expr ) }),
+            Length::Func(func) => tokens.append_all(quote! { #func(&self.to_immutable()) }),
         }
+    }
+}
+
+impl From<usize> for Length {
+    fn from(bits: usize) -> Self {
+        Length::Bits(bits)
+    }
+}
+
+impl From<syn::Expr> for Length {
+    fn from(expr: syn::Expr) -> Self {
+        Length::Expr(expr)
+    }
+}
+
+impl From<syn::Ident> for Length {
+    fn from(func: syn::Ident) -> Self {
+        Length::Func(func)
     }
 }
 
@@ -64,24 +80,22 @@ impl ToBytesOffset for usize {
 
 impl<'a> ToBytesOffset for &'a [Length] {
     fn bytes_offset(&self) -> TokenStream {
-        let offsets = reduce_offset(self.iter()).collect::<Vec<_>>();
+        let offsets = reduce_offsets(self.iter()).collect::<Vec<_>>();
 
         match offsets.first() {
             Some(Length::Bits(bits)) if offsets.len() == 1 => {
                 let offset = (bits + 7) / 8;
 
-                quote! { #offset }
+                return quote! { #offset };
             }
-            _ => {
-                let length_funcs = self;
-
-                quote! { #(#length_funcs)+* }
-            }
+            _ => {}
         }
+
+        quote! { #(#offsets)+* }
     }
 }
 
-fn reduce_offset<'a, I: IntoIterator<Item = &'a Length>>(lens: I) -> impl Iterator<Item = Length> {
+fn reduce_offsets<'a, I: IntoIterator<Item = &'a Length>>(lens: I) -> impl Iterator<Item = Length> {
     let (length_funcs, total_bits) =
         lens.into_iter()
             .fold((vec![], 0), |(mut lens, total_bits), len| {
@@ -124,6 +138,45 @@ mod tests {
         ($name:expr, $span:expr) => {
             ::syn::Ident::new($name, $span)
         };
+    }
+
+    #[test]
+    fn test_length() {
+        let len = Length::Bits(32);
+        assert_eq!(len, 32.into());
+        assert_eq!(len.into_token_stream().to_string(), "32usize");
+
+        let expr: syn::Expr = parse_quote!{ 1 + 2 };
+        let len = Length::Expr(expr.clone());
+
+        assert_eq!(len, expr.into());
+        assert_eq!(len.into_token_stream().to_string(), "( 1 + 2 )");
+
+        let func = ident!("foo");
+        let len = Length::Func(func.clone());
+
+        assert_eq!(len, func.into());
+        assert_eq!(
+            len.into_token_stream().to_string(),
+            "foo ( & self . to_immutable ( ) )"
+        );
+    }
+
+    #[test]
+    fn test_bytes_offset() {
+        assert_eq!(12usize.bytes_offset().to_string(), "2usize");
+        assert_eq!(16usize.bytes_offset().to_string(), "2usize");
+        assert_eq!(18usize.bytes_offset().to_string(), "3usize");
+
+        let funcs = &[
+            Length::Bits(2),
+            Length::Bits(4),
+            Length::Expr(parse_quote! { 1 + 2 * 3 }),
+            Length::Bits(8),
+            Length::Func(ident!("foo")),
+        ][..];
+
+        assert_eq!(funcs.bytes_offset().to_string(), "14usize + ( 1 + 2 * 3 ) + foo ( & self . to_immutable ( ) )");
     }
 
     #[test]

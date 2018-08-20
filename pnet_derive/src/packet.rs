@@ -32,40 +32,6 @@ pub struct Packet {
 }
 
 impl Packet {
-    fn base_name(&self) -> &syn::Ident {
-        &self.ident
-    }
-
-    fn immutable_packet_name(&self) -> syn::Ident {
-        syn::Ident::new(&format!("{}Packet", self.base_name()), Span::call_site())
-    }
-
-    fn mutable_packet_name(&self) -> syn::Ident {
-        syn::Ident::new(
-            &format!("Mutable{}Packet", self.base_name()),
-            Span::call_site(),
-        )
-    }
-
-    fn packet_name(&self, mutable: bool) -> syn::Ident {
-        if mutable {
-            self.mutable_packet_name()
-        } else {
-            self.immutable_packet_name()
-        }
-    }
-
-    fn packet_data(&self, mutable: bool) -> syn::Ident {
-        syn::Ident::new(
-            if mutable {
-                "MutPacketData"
-            } else {
-                "PacketData"
-            },
-            Span::call_site(),
-        )
-    }
-
     fn parse(ident: syn::Ident, fields: syn::Fields) -> Result<Packet> {
         if let syn::Fields::Named(fields) = fields {
             let fields = fields

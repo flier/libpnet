@@ -1150,7 +1150,7 @@ mod tests {
                     .as_vec()
                     .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
-                "8"
+                "( 8 )"
             );
 
             assert_eq!(
@@ -1164,7 +1164,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
-                        let packet_length = 8;
+                        let packet_length = ( 8 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
                         &self.packet[off..end]
@@ -1176,7 +1176,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
-                        let packet_length = 8;
+                        let packet_length = ( 8 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
                         &mut self.packet[off..end]
@@ -1188,7 +1188,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
-                        let packet_length = 8;
+                        let packet_length = ( 8 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
                         let packet = &self.packet[off..end];
 
@@ -1206,7 +1206,7 @@ mod tests {
                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
-                       let packet_length = 8;
+                       let packet_length = ( 8 );
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
                        let packet = &mut self.packet[off..end];
 
@@ -1224,7 +1224,7 @@ mod tests {
                     .as_vec()
                     .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
-                "4 + 4"
+                "( 4 + 4 )"
             );
 
             assert_eq!(
@@ -1238,7 +1238,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
-                        let packet_length = 4 + 4;
+                        let packet_length = ( 4 + 4 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
                         &self.packet[off..end]
@@ -1250,7 +1250,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
-                        let packet_length = 4 + 4;
+                        let packet_length = ( 4 + 4 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
                         &mut self.packet[off..end]
@@ -1262,7 +1262,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
-                        let packet_length = 4 + 4;
+                        let packet_length = ( 4 + 4 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
                         let packet = &self.packet[off..end];
 
@@ -1280,7 +1280,7 @@ mod tests {
                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
-                       let packet_length = 4 + 4;
+                       let packet_length = ( 4 + 4 );
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
                        let packet = &mut self.packet[off..end];
 
@@ -1298,7 +1298,7 @@ mod tests {
                     .as_vec()
                     .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
-                "self . pkt_len / 2"
+                "( self . pkt_len / 2 )"
             );
 
             assert_eq!(
@@ -1312,7 +1312,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
-                        let packet_length = self.pkt_len / 2;
+                        let packet_length = ( self . pkt_len / 2 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
                         &self.packet[off..end]
@@ -1324,7 +1324,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
-                        let packet_length = self.pkt_len / 2;
+                        let packet_length = ( self . pkt_len / 2 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
                         &mut self.packet[off..end]
@@ -1336,7 +1336,7 @@ mod tests {
                     #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
-                        let packet_length = self.pkt_len / 2;
+                        let packet_length = ( self . pkt_len / 2 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
                         let packet = &self.packet[off..end];
 
@@ -1354,7 +1354,7 @@ mod tests {
                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
-                       let packet_length = self.pkt_len / 2;
+                       let packet_length = ( self . pkt_len / 2 );
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
                        let packet = &mut self.packet[off..end];
 
