@@ -260,4 +260,85 @@ impl Field {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_field_with_unknown_attributes() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[foo]
+                body: Vec<u16>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "unknown attribute # [ foo ]"
+        );
+    }
+
+    #[test]
+    fn test_vec_field_without_length() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: Vec<u8>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "variable length field must have #[length] or #[length_fn] attribute"
+        );
+    }
+
+    #[test]
+    fn test_vec_field_with_vec_item() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: Vec<Vec<u8>>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "non-primitive field types must specify #[construct_with]"
+        );
+    }
+
+    #[test]
+    fn test_payload_field_with_short_item() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[payload]
+                foo: Vec<u4>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "variable length fields must align to byte"
+        );
+    }
+
+    #[test]
+    fn test_custom_field_without_construct_with() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                body: HashSet<u16>,
+            }
+        };
+
+        assert_eq!(
+            Field::parse(fields.named.into_iter().next().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "non-primitive field types must specify #[construct_with]"
+        );
+    }
 }
