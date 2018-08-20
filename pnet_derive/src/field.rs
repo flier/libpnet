@@ -1,6 +1,6 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{self, spanned::Spanned};
+use syn;
 
 use gen::{read_operations, write_operations};
 use types::{parse_primitive, Endianness, Length, Result};

@@ -1,6 +1,6 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{self, spanned::Spanned};
+use syn;
 
 use field::Field;
 use gen::{Generator, PacketGenerator};

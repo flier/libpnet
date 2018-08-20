@@ -16,6 +16,10 @@ extern crate syn;
 #[cfg(test)]
 #[macro_use]
 extern crate lazy_static;
+#[cfg(test)]
+extern crate colored;
+#[cfg(test)]
+extern crate diff;
 
 mod field;
 mod gen;

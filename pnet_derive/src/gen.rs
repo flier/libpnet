@@ -879,7 +879,7 @@ impl<'a> Generator for CustomFieldMutator<'a> {
             #[allow(trivial_numeric_casts)]
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #set_field(&mut self, val: #field_ty) {
-                use pnet_macros_support::packet::PrimitiveValues;
+                use ::pnet_macros_support::packet::PrimitiveValues;
 
                 let vals = val.to_primitive_values();
 
@@ -990,7 +990,13 @@ pub fn write_operations<O: ToBytesOffset, T: ToTokens, V: ToTokens>(
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::min;
+
+    use colored::*;
+    use diff;
+
     use super::*;
+    use packet;
 
     macro_rules! ident {
         ($name:expr) => {
@@ -999,6 +1005,430 @@ mod tests {
         ($name:expr, $span:expr) => {
             ::syn::Ident::new($name, $span)
         };
+    }
+
+    #[test]
+    fn test_packet() {
+        let input: syn::DeriveInput = parse_quote! {
+            #[packet]
+            pub struct Foo{
+                pub flags: u8,
+
+                pub length: u32,
+
+                #[construct_with(u16)]
+                pub hardware_type: ArpHardwareType,
+
+                #[construct_with(u8, u8, u8, u8, u8, u8)]
+                pub sender_hw_addr: MacAddr,
+
+                #[payload]
+                body: Vec<u8>,
+            }
+        };
+
+        let packets = packet::parse(input).unwrap();
+
+        assert_eq!(packets.len(), 1);
+
+        let packet = packets.first().unwrap();
+
+        let generated = packet.into_token_stream().to_string();
+        let expected = quote!{
+            impl<'a> FooPacket<'a> {
+                #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_flags(&self) -> u8 {
+                    self.packet[0usize]
+                }
+                #[doc = "Get the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_length(&self) -> u32 {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u32(&self.packet[1usize..])
+                }
+                #[doc = "Get the value of the hardware_type field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_hardware_type(&self) -> ArpHardwareType {
+                    ArpHardwareType::new(
+                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[5usize..])
+                    )
+                }
+                #[doc = "Get the value of the sender_hw_addr field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_sender_hw_addr(&self) -> MacAddr {
+                    MacAddr::new(
+                        self.packet[7usize],
+                        self.packet[8usize],
+                        self.packet[9usize],
+                        self.packet[10usize],
+                        self.packet[11usize],
+                        self.packet[12usize]
+                    )
+                }
+                #[doc = "Get the value of the body field (copies contents)"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Vec<u8> {
+                    let off = 13usize;
+                    let packet = &self.packet[off..];
+                    packet.to_vec()
+                }
+                #[doc = "Set the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_flags(&mut self, val: u8) {
+                    self.packet[0usize] = val;
+                }
+                #[doc = "Set the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_length(&mut self, val: u32) {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u32(
+                        &mut self.packet[1usize..],
+                        val
+                    );
+                }
+                #[doc = "Set the value of the hardware_type field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
+                    use ::pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(
+                        &mut self.packet[5usize..],
+                        vals.0usize
+                    );
+                }
+                #[doc = "Set the value of the sender_hw_addr field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
+                    use ::pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+                    self.packet[7usize] = vals.0usize;
+                    self.packet[8usize] = vals.1usize;
+                    self.packet[9usize] = vals.2usize;
+                    self.packet[10usize] = vals.3usize;
+                    self.packet[11usize] = vals.4usize;
+                    self.packet[12usize] = vals.5usize;
+                }
+                #[doc = "Set the value of the body field (copies contents)"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_body(&mut self, vals: &[u8]) {
+                    let off = 13usize;
+                    let packet = &mut self.packet[off..];
+                    packet.copy_from_slice(vals)
+                }
+                #[doc = "Constructs a new FooPacket.\nIf the provided buffer is less than the minimum required packet size, this will return None."]
+                #[inline]
+                pub fn new<'p>(packet: &'p [u8]) -> Option<FooPacket<'p>> {
+                    if packet.len() >= FooPacket::minimum_packet_size() {
+                        use ::pnet_macros_support::packet::PacketData;
+                        Some(FooPacket {
+                            packet: PacketData::Borrowed(packet)
+                        })
+                    } else {
+                        None
+                    }
+                }
+                #[doc = "Constructs a new FooPacket.\nIf the provided buffer is less than the minimum required packet size,\nthis will return None. With this constructor the FooPacket will own its own data\nand the underlying buffer will be dropped when the FooPacket is."]
+                pub fn owned(packet: Vec<u8>) -> Option<FooPacket<'static>> {
+                    if packet.len() >= FooPacket::minimum_packet_size() {
+                        use ::pnet_macros_support::packet::PacketData;
+                        Some(FooPacket {
+                            packet: PacketData::Owned(packet)
+                        })
+                    } else {
+                        None
+                    }
+                }
+                #[doc = "Maps from a MutableFooPacket to a FooPacket"]
+                #[inline]
+                pub fn to_immutable<'p>(&'p self) -> FooPacket<'p> {
+                    use ::pnet_macros_support::packet::PacketData;
+                    FooPacket {
+                        packet: PacketData::Borrowed(self.packet.as_slice())
+                    }
+                }
+                #[doc = "Maps from a MutableFooPacket to a FooPacket while consuming the source"]
+                #[inline]
+                pub fn consume_to_immutable(self) -> FooPacket<'a> {
+                    FooPacket {
+                        packet: self.packet.to_immutable()
+                    }
+                }
+                #[doc = r" The minimum size (in bytes) a packet of this type can be. It's based on the total size"]
+                #[doc = r" of the fixed-size fields."]
+                #[inline]
+                pub fn minimum_packet_size() -> usize {
+                    13usize
+                }
+                #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
+                #[inline]
+                pub fn packet_size(_packet: &Foo) -> usize {
+                    104usize + (self.packet.body.len())
+                }
+                #[doc = "Populates a MutableFooPacket using a Foo structure"]
+                #[inline]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn populate(&self, packet: &Foo) {
+                    self.set_flags(packet.flags);
+                    self.set_length(packet.length);
+                    self.set_hardware_type(packet.hardware_type);
+                    self.set_sender_hw_addr(packet.sender_hw_addr);
+                    self.set_body(&packet.body);
+                }
+            }
+            impl<'a> MutableFooPacket<'a> {
+                #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_flags(&self) -> u8 {
+                    self.packet[0usize]
+                }
+                #[doc = "Get the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_length(&self) -> u32 {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u32(&self.packet[1usize..])
+                }
+                #[doc = "Get the value of the hardware_type field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_hardware_type(&self) -> ArpHardwareType {
+                    ArpHardwareType::new(
+                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[5usize..])
+                    )
+                }
+                #[doc = "Get the value of the sender_hw_addr field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_sender_hw_addr(&self) -> MacAddr {
+                    MacAddr::new(
+                        self.packet[7usize],
+                        self.packet[8usize],
+                        self.packet[9usize],
+                        self.packet[10usize],
+                        self.packet[11usize],
+                        self.packet[12usize]
+                    )
+                }
+                #[doc = "Get the value of the body field (copies contents)"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Vec<u8> {
+                    let off = 13usize;
+                    let packet = &self.packet[off..];
+                    packet.to_vec()
+                }
+                #[doc = "Set the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_flags(&mut self, val: u8) {
+                    self.packet[0usize] = val;
+                }
+                #[doc = "Set the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_length(&mut self, val: u32) {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u32(
+                        &mut self.packet[1usize..],
+                        val
+                    );
+                }
+                #[doc = "Set the value of the hardware_type field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
+                    use ::pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(
+                        &mut self.packet[5usize..],
+                        vals.0usize
+                    );
+                }
+                #[doc = "Set the value of the sender_hw_addr field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
+                    use ::pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+                    self.packet[7usize] = vals.0usize;
+                    self.packet[8usize] = vals.1usize;
+                    self.packet[9usize] = vals.2usize;
+                    self.packet[10usize] = vals.3usize;
+                    self.packet[11usize] = vals.4usize;
+                    self.packet[12usize] = vals.5usize;
+                }
+                #[doc = "Set the value of the body field (copies contents)"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_body(&mut self, vals: &[u8]) {
+                    let off = 13usize;
+                    let packet = &mut self.packet[off..];
+                    packet.copy_from_slice(vals)
+                }
+                #[doc = "Constructs a new MutableFooPacket.\nIf the provided buffer is less than the minimum required packet size, this will return None."]
+                #[inline]
+                pub fn new<'p>(packet: &'p mut [u8]) -> Option<MutableFooPacket<'p>> {
+                    if packet.len() >= MutableFooPacket::minimum_packet_size() {
+                        use ::pnet_macros_support::packet::MutPacketData;
+                        Some(MutableFooPacket {
+                            packet: MutPacketData::Borrowed(packet)
+                        })
+                    } else {
+                        None
+                    }
+                }
+                #[doc = "Constructs a new MutableFooPacket.\nIf the provided buffer is less than the minimum required packet size,\nthis will return None. With this constructor the MutableFooPacket will own its own data\nand the underlying buffer will be dropped when the MutableFooPacket is."]
+                pub fn owned(packet: Vec<u8>) -> Option<MutableFooPacket<'static>> {
+                    if packet.len() >= MutableFooPacket::minimum_packet_size() {
+                        use ::pnet_macros_support::packet::MutPacketData;
+                        Some(MutableFooPacket {
+                            packet: MutPacketData::Owned(packet)
+                        })
+                    } else {
+                        None
+                    }
+                }
+                #[doc = "Maps from a MutableFooPacket to a FooPacket"]
+                #[inline]
+                pub fn to_immutable<'p>(&'p self) -> FooPacket<'p> {
+                    use ::pnet_macros_support::packet::PacketData;
+                    FooPacket {
+                        packet: PacketData::Borrowed(self.packet.as_slice())
+                    }
+                }
+                #[doc = "Maps from a MutableFooPacket to a FooPacket while consuming the source"]
+                #[inline]
+                pub fn consume_to_immutable(self) -> FooPacket<'a> {
+                    FooPacket {
+                        packet: self.packet.to_immutable()
+                    }
+                }
+                #[doc = r" The minimum size (in bytes) a packet of this type can be. It's based on the total size"]
+                #[doc = r" of the fixed-size fields."]
+                #[inline]
+                pub fn minimum_packet_size() -> usize {
+                    13usize
+                }
+                #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
+                #[inline]
+                pub fn packet_size(_packet: &Foo) -> usize {
+                    104usize + (self.packet.body.len())
+                }
+                #[doc = "Populates a MutableFooPacket using a Foo structure"]
+                #[inline]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn populate(&self, packet: &Foo) {
+                    self.set_flags(packet.flags);
+                    self.set_length(packet.length);
+                    self.set_hardware_type(packet.hardware_type);
+                    self.set_sender_hw_addr(packet.sender_hw_addr);
+                    self.set_body(&packet.body);
+                }
+            }
+        }.to_string();
+
+        let diffs = diff::chars(generated.as_str(), expected.as_str())
+            .into_iter()
+            .enumerate()
+            .filter(|(_, res)| {
+                if let diff::Result::Both(_, _) = res {
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert!(diffs.is_empty(), "{}", {
+            let (off, ref res) = diffs.first().unwrap().clone();
+
+            match res {
+                diff::Result::Left(_) => {
+                    let mut end = off;
+
+                    for (cur, res) in diffs {
+                        match res {
+                            diff::Result::Left(_) if cur <= end + 1 => end = cur,
+                            _ => break,
+                        }
+                    }
+
+                    let end = end + 1;
+                    let len = end - off;
+
+                    format!(
+                        "diff @ {}\ngenerated: {}{}{}\n expected: {}",
+                        off,
+                        &generated[off.checked_sub(40).unwrap_or(0)..off].dimmed(),
+                        &generated[off..min(end, off + 80)].bright_yellow(),
+                        if len < 80 {
+                            &generated[end..min(end + 80 - len, generated.len())]
+                        } else {
+                            ""
+                        }.dimmed(),
+                        &expected[off.checked_sub(40).unwrap_or(0)..min(off + 80, expected.len())]
+                            .dimmed()
+                    )
+                }
+                diff::Result::Right(_) => {
+                    let mut end = off;
+
+                    for (cur, res) in diffs {
+                        match res {
+                            diff::Result::Right(_) if cur <= end + 1 => end = cur,
+                            _ => break,
+                        }
+                    }
+
+                    let end = end + 1;
+                    let len = end - off;
+
+                    format!(
+                        "diff @ {}\ngenerated: {}\n expected: {}{}{}",
+                        off,
+                        &generated
+                            [off.checked_sub(40).unwrap_or(0)..min(off + 80, generated.len())]
+                            .dimmed(),
+                        &expected[off.checked_sub(40).unwrap_or(0)..off].dimmed(),
+                        &expected[off..min(end, off + 80)].bright_yellow(),
+                        if len < 80 {
+                            &expected[end..min(end + 80 - len, expected.len())]
+                        } else {
+                            ""
+                        }.dimmed()
+                    )
+                }
+                _ => "".to_owned(),
+            }
+        });
     }
 
     #[test]
@@ -1527,7 +1957,7 @@ mod tests {
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
-                    use pnet_macros_support::packet::PrimitiveValues;
+                    use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
 
                     <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut self.packet[2usize..], vals.0usize);
@@ -1584,7 +2014,7 @@ mod tests {
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
-                    use pnet_macros_support::packet::PrimitiveValues;
+                    use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
 
                     self.packet[2usize] = vals.0usize;
@@ -1625,7 +2055,7 @@ mod tests {
                 #[allow(trivial_numeric_casts)]
                 #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn set_body(&mut self, val: Body) {
-                    use pnet_macros_support::packet::PrimitiveValues;
+                    use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
 
                     self.packet[2usize..2usize + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
