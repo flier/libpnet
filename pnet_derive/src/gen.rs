@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::iter::FromIterator;
 use std::ops::Deref;
 
 use proc_macro2::{Span, TokenStream};
@@ -7,26 +8,30 @@ use syn;
 
 use field::{Field, Kind};
 use packet::Packet;
-use types::{Endianness, Length, ToBytesOffset};
+use types::{parse_primitive, Endianness, Length, ToBytesOffset};
 
-trait Generator {
+pub trait Generator {
     fn tokens(&self) -> TokenStream;
 }
 
-pub struct PacketGenerator {
-    packet: Packet,
+pub struct PacketGenerator<'a> {
+    packet: &'a Packet,
     mutable: bool,
 }
 
-impl Deref for PacketGenerator {
+impl<'a> Deref for PacketGenerator<'a> {
     type Target = Packet;
 
     fn deref(&self) -> &Self::Target {
-        &self.packet
+        self.packet
     }
 }
 
-impl PacketGenerator {
+impl<'a> PacketGenerator<'a> {
+    pub fn new(packet: &'a Packet, mutable: bool) -> Self {
+        PacketGenerator { packet, mutable }
+    }
+
     fn base_name(&self) -> &syn::Ident {
         &self.packet.ident
     }
@@ -62,14 +67,14 @@ impl PacketGenerator {
     }
 }
 
-impl Generator for PacketGenerator {
+impl<'a> Generator for PacketGenerator<'a> {
     fn tokens(&self) -> TokenStream {
         let packet_name = self.packet_name();
 
         let (accessors, _) = self.packet.fields.iter().fold(
             (vec![], vec![]),
             |(mut accessors, mut length_funcs), field| {
-                accessors.push(FieldAccessor::new(self, field, &length_funcs).tokens());
+                accessors.push(FieldAccessor::new(field, self.mutable, &length_funcs).tokens());
                 if let Some(bits) = field.bits() {
                     length_funcs.push(bits)
                 }
@@ -80,7 +85,7 @@ impl Generator for PacketGenerator {
         let (mutators, _) = self.packet.fields.iter().fold(
             (vec![], vec![]),
             |(mut mutators, mut length_funcs), field| {
-                mutators.push(FieldMutators(self, field, &length_funcs).tokens());
+                mutators.push(FieldMutator::new(field, &length_funcs).tokens());
                 if let Some(bits) = field.bits() {
                     length_funcs.push(bits)
                 }
@@ -133,7 +138,7 @@ impl Generator for PacketGenerator {
     }
 }
 
-struct New<'a>(&'a PacketGenerator);
+struct New<'a>(&'a PacketGenerator<'a>);
 
 impl<'a> Generator for New<'a> {
     fn tokens(&self) -> TokenStream {
@@ -166,7 +171,7 @@ If the provided buffer is less than the minimum required packet size, this will 
     }
 }
 
-struct Owned<'a>(&'a PacketGenerator);
+struct Owned<'a>(&'a PacketGenerator<'a>);
 
 impl<'a> Generator for Owned<'a> {
     fn tokens(&self) -> TokenStream {
@@ -195,7 +200,7 @@ and the underlying buffer will be dropped when the {0} is.",
     }
 }
 
-struct ToImmutable<'a>(&'a PacketGenerator);
+struct ToImmutable<'a>(&'a PacketGenerator<'a>);
 
 impl<'a> Generator for ToImmutable<'a> {
     fn tokens(&self) -> TokenStream {
@@ -218,7 +223,7 @@ impl<'a> Generator for ToImmutable<'a> {
     }
 }
 
-struct ConsumeToImmutable<'a>(&'a PacketGenerator);
+struct ConsumeToImmutable<'a>(&'a PacketGenerator<'a>);
 
 impl<'a> Generator for ConsumeToImmutable<'a> {
     fn tokens(&self) -> TokenStream {
@@ -240,7 +245,7 @@ impl<'a> Generator for ConsumeToImmutable<'a> {
     }
 }
 
-struct MinimumPacketSize<'a>(&'a PacketGenerator, &'a [Length]);
+struct MinimumPacketSize<'a>(&'a PacketGenerator<'a>, &'a [Length]);
 
 impl<'a> Generator for MinimumPacketSize<'a> {
     fn tokens(&self) -> TokenStream {
@@ -257,7 +262,7 @@ impl<'a> Generator for MinimumPacketSize<'a> {
     }
 }
 
-struct PacketSize<'a>(&'a PacketGenerator, &'a [Length]);
+struct PacketSize<'a>(&'a PacketGenerator<'a>, &'a [Length]);
 
 impl<'a> Generator for PacketSize<'a> {
     fn tokens(&self) -> TokenStream {
@@ -278,7 +283,7 @@ impl<'a> Generator for PacketSize<'a> {
     }
 }
 
-struct Populate<'a>(&'a PacketGenerator);
+struct Populate<'a>(&'a PacketGenerator<'a>);
 
 impl<'a> Generator for Populate<'a> {
     fn tokens(&self) -> TokenStream {
@@ -317,16 +322,24 @@ impl<'a> Generator for Populate<'a> {
 }
 
 struct FieldAccessor<'a> {
-    gen: &'a PacketGenerator,
     field: &'a Field,
+    mutable: bool,
     length_funcs: &'a [Length],
 }
 
+impl<'a> Deref for FieldAccessor<'a> {
+    type Target = Field;
+
+    fn deref(&self) -> &Self::Target {
+        &self.field
+    }
+}
+
 impl<'a> FieldAccessor<'a> {
-    pub fn new(gen: &'a PacketGenerator, field: &'a Field, length_funcs: &'a [Length]) -> Self {
+    pub fn new(field: &'a Field, mutable: bool, length_funcs: &'a [Length]) -> Self {
         FieldAccessor {
-            gen,
             field,
+            mutable,
             length_funcs,
         }
     }
@@ -335,11 +348,27 @@ impl<'a> FieldAccessor<'a> {
 impl<'a> Generator for FieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
         match self.field.kind {
-            Kind::Primitive { bits, endianness } => {
-                PrimitiveFieldAccessor::new(self, bits, endianness).tokens()
-            }
-            Kind::Vec { .. } => VecFieldAccessor(self).tokens(),
-            Kind::Custom { .. } => CustomFieldAccessor(self).tokens(),
+            Kind::Primitive { bits, endianness } => PrimitiveFieldAccessor {
+                accessor: self,
+                bits,
+                endianness,
+            }.tokens(),
+            Kind::Vec {
+                ref item_ty,
+                item_bits,
+                endianness,
+                ref packet_length,
+            } => VecFieldAccessor {
+                accessor: self,
+                item_ty,
+                item_bits,
+                endianness,
+                packet_length: packet_length.as_ref(),
+            }.tokens(),
+            Kind::Custom { ref construct_with } => CustomFieldAccessor {
+                accessor: self,
+                arg_types: construct_with,
+            }.tokens(),
         }
     }
 }
@@ -348,20 +377,6 @@ struct PrimitiveFieldAccessor<'a> {
     accessor: &'a FieldAccessor<'a>,
     bits: usize,
     endianness: Option<Endianness>,
-}
-
-impl<'a> PrimitiveFieldAccessor<'a> {
-    pub fn new(
-        accessor: &'a FieldAccessor<'a>,
-        bits: usize,
-        endianness: Option<Endianness>,
-    ) -> Self {
-        PrimitiveFieldAccessor {
-            accessor,
-            bits,
-            endianness,
-        }
-    }
 }
 
 impl<'a> Deref for PrimitiveFieldAccessor<'a> {
@@ -374,21 +389,21 @@ impl<'a> Deref for PrimitiveFieldAccessor<'a> {
 
 impl<'a> Generator for PrimitiveFieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
-        let field_name = &self.field.ident;
-        let field_ty = &self.field.ty;
+        let field_name = &self.ident;
+        let field_ty = &self.ty;
         let comment = format!("Get the {} field.
 This field is always stored in {} endianness within the struct, but this accessor returns host order.",
             field_name, self.endianness.map_or("host", |e| e.name())
         );
         let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
         let read_ops = read_operations(
-            self.accessor.length_funcs,
+            self.length_funcs,
             self.bits,
             self.endianness,
             quote!{ self.packet },
         );
 
-        quote_spanned! { self.field.span() =>
+        quote_spanned! { self.span() =>
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
@@ -400,27 +415,477 @@ This field is always stored in {} endianness within the struct, but this accesso
     }
 }
 
-struct VecFieldAccessor<'a>(&'a FieldAccessor<'a>);
+struct VecFieldAccessor<'a> {
+    accessor: &'a FieldAccessor<'a>,
+    item_ty: &'a syn::Ident,
+    item_bits: usize,
+    endianness: Option<Endianness>,
+    packet_length: Option<&'a Length>,
+}
+
+impl<'a> Deref for VecFieldAccessor<'a> {
+    type Target = FieldAccessor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.accessor
+    }
+}
 
 impl<'a> Generator for VecFieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
-        quote!{}
+        let raw_accessors = self
+            .packet_length
+            .map(|_| RawVecFieldAccessor(self).tokens());
+
+        let vec_primitive_accessor = PrimitiveVecFieldAccessor(self).tokens();
+
+        quote_spanned! { self.span() =>
+            #raw_accessors
+
+            #vec_primitive_accessor
+        }
     }
 }
 
-struct CustomFieldAccessor<'a>(&'a FieldAccessor<'a>);
+struct RawVecFieldAccessor<'a>(&'a VecFieldAccessor<'a>);
+
+impl<'a> Deref for RawVecFieldAccessor<'a> {
+    type Target = VecFieldAccessor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a> Generator for RawVecFieldAccessor<'a> {
+    fn tokens(&self) -> TokenStream {
+        let field_name = &self.ident;
+        let current_offset = self.length_funcs.bytes_offset();
+        let packet_length = self.packet_length;
+
+        let get_field_raw = {
+            let comment = format!(
+                "Get the raw &[u8] value of the {} field, without copying",
+                field_name
+            );
+            let get_field_raw =
+                syn::Ident::new(&format!("get_{}_raw", field_name), Span::call_site());
+
+            quote_spanned! { self.span() =>
+                #[doc = #comment]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn #get_field_raw(&self) -> &[u8] {
+                    let off = #current_offset;
+                    let packet_length = #packet_length;
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    &self.packet[off..end]
+                }
+            }
+        };
+
+        let get_field_raw_mut = if self.mutable {
+            let comment = format!(
+                "Get the raw &mut [u8] value of the {} field, without copying",
+                field_name
+            );
+            let get_field_raw_mut =
+                syn::Ident::new(&format!("get_{}_raw_mut", field_name), Span::call_site());
+
+            Some(quote_spanned! { self.span() =>
+                #[doc = #comment]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn #get_field_raw_mut(&mut self) -> &mut [u8] {
+                    let off = #current_offset;
+                    let packet_length = #packet_length;
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    &mut self.packet[off..end]
+                }
+            })
+        } else {
+            None
+        };
+
+        quote_spanned! { self.span() =>
+            #get_field_raw
+
+            #get_field_raw_mut
+        }
+    }
+}
+
+struct PrimitiveVecFieldAccessor<'a>(&'a VecFieldAccessor<'a>);
+
+impl<'a> Deref for PrimitiveVecFieldAccessor<'a> {
+    type Target = VecFieldAccessor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a> Generator for PrimitiveVecFieldAccessor<'a> {
+    fn tokens(&self) -> TokenStream {
+        let field_name = &self.ident;
+        let comment = format!(
+            "Get the value of the {} field (copies contents)",
+            field_name
+        );
+        let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+        let current_offset = self.length_funcs.bytes_offset();
+        let item_ty = &self.item_ty;
+
+        let packet = if let Some(packet_length) = self.packet_length {
+            quote! {
+                let packet_length = #packet_length;
+                let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                let packet = &self.packet[off..end];
+            }
+        } else {
+            quote! {
+                let packet = &self.packet[off..];
+            }
+        };
+        let read_ops = if self.item_ty == "u8" {
+            quote! {
+                packet.to_vec()
+            }
+        } else {
+            let item_size = self.item_bits / 8;
+            let read_ops = read_operations(0, self.item_bits, self.endianness, quote! { chunk });
+
+            quote! {
+                packet.chunks(off).map(|chunk| { #read_ops }).collect()
+            }
+        };
+
+        quote_spanned! { self.span() =>
+            #[doc = #comment]
+            #[inline]
+            #[allow(trivial_numeric_casts)]
+            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+            pub fn #get_field(&self) -> Vec<#item_ty> {
+                let off = #current_offset;
+
+                #packet
+
+                #read_ops
+            }
+        }
+    }
+}
+
+struct CustomFieldAccessor<'a> {
+    accessor: &'a FieldAccessor<'a>,
+    arg_types: &'a [syn::Ident],
+}
+
+impl<'a> Deref for CustomFieldAccessor<'a> {
+    type Target = FieldAccessor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.accessor
+    }
+}
 
 impl<'a> Generator for CustomFieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
-        quote!{}
+        let field_name = &self.ident;
+        let field_ty = &self.ty;
+        let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+
+        let ctor = if self.arg_types.is_empty() {
+            let bytes_offset = self.length_funcs.bytes_offset();
+
+            quote! {
+                #field_ty ::new(&self.packet[#bytes_offset ..])
+            }
+        } else {
+            let mut args = vec![];
+            let mut length_funcs = Vec::from_iter(self.length_funcs.iter().cloned());
+
+            for arg_ty in self.arg_types {
+                let (bits, endianness) = parse_primitive(&arg_ty)
+                    .expect("arguments to #[construct_with] must be primitives");
+
+                let read_ops = read_operations(
+                    length_funcs.as_slice(),
+                    bits,
+                    endianness,
+                    quote! { self.packet },
+                );
+
+                args.push(quote! {
+                    #(#read_ops)*
+                });
+
+                length_funcs.push(Length::Bits(bits));
+            }
+
+            quote! {
+                #field_ty ::new( #(#args),* )
+            }
+        };
+
+        let comment = format!("Get the value of the {} field", field_name);
+
+        quote_spanned! { self.span() =>
+            #[doc = #comment]
+            #[inline]
+            #[allow(trivial_numeric_casts)]
+            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+            pub fn #get_field(&self) -> #field_ty {
+                #ctor
+            }
+        }
     }
 }
 
-struct FieldMutators<'a>(&'a PacketGenerator, &'a Field, &'a [Length]);
+struct FieldMutator<'a> {
+    field: &'a Field,
+    length_funcs: &'a [Length],
+}
 
-impl<'a> Generator for FieldMutators<'a> {
+impl<'a> Deref for FieldMutator<'a> {
+    type Target = Field;
+
+    fn deref(&self) -> &Self::Target {
+        &self.field
+    }
+}
+
+impl<'a> FieldMutator<'a> {
+    pub fn new(field: &'a Field, length_funcs: &'a [Length]) -> Self {
+        FieldMutator {
+            field,
+            length_funcs,
+        }
+    }
+}
+
+impl<'a> Generator for FieldMutator<'a> {
     fn tokens(&self) -> TokenStream {
-        quote!{}
+        match self.field.kind {
+            Kind::Primitive { bits, endianness } => PrimitiveFieldMutator {
+                mutator: self,
+                bits,
+                endianness,
+            }.tokens(),
+            Kind::Vec {
+                ref item_ty,
+                item_bits,
+                endianness,
+                ref packet_length,
+            } => VecFieldMutator {
+                mutator: self,
+                item_ty,
+                item_bits,
+                endianness,
+                packet_length: packet_length.as_ref(),
+            }.tokens(),
+            Kind::Custom { ref construct_with } => CustomFieldMutator {
+                mutator: self,
+                arg_types: construct_with,
+            }.tokens(),
+        }
+    }
+}
+
+struct PrimitiveFieldMutator<'a> {
+    mutator: &'a FieldMutator<'a>,
+    bits: usize,
+    endianness: Option<Endianness>,
+}
+
+impl<'a> Deref for PrimitiveFieldMutator<'a> {
+    type Target = FieldMutator<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mutator
+    }
+}
+
+impl<'a> Generator for PrimitiveFieldMutator<'a> {
+    fn tokens(&self) -> TokenStream {
+        let field_name = &self.ident;
+        let field_ty = &self.ty;
+        let comment = format!("Set the {} field.
+This field is always stored in {} endianness within the struct, but this accessor returns host order.",
+                            field_name, self.endianness.map_or("host", |e| e.name())
+                        );
+        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+        let write_ops = write_operations(
+            self.length_funcs,
+            self.bits,
+            self.endianness,
+            quote! { self.packet },
+            quote! { val },
+        );
+
+        quote_spanned! { self.span() =>
+            #[doc = #comment]
+            #[inline]
+            #[allow(trivial_numeric_casts)]
+            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+            pub fn #set_field(&mut self, val: #field_ty) {
+                #(#write_ops)*
+            }
+        }
+    }
+}
+
+struct VecFieldMutator<'a> {
+    mutator: &'a FieldMutator<'a>,
+    item_ty: &'a syn::Ident,
+    item_bits: usize,
+    endianness: Option<Endianness>,
+    packet_length: Option<&'a Length>,
+}
+
+impl<'a> Deref for VecFieldMutator<'a> {
+    type Target = FieldMutator<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mutator
+    }
+}
+
+impl<'a> Generator for VecFieldMutator<'a> {
+    fn tokens(&self) -> TokenStream {
+        let field_name = &self.ident;
+        let comment = format!(
+            "Set the value of the {} field (copies contents)",
+            field_name
+        );
+        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+        let item_ty = self.item_ty;
+        let current_offset = self.length_funcs.bytes_offset();
+        let packet = if let Some(packet_length) = self.packet_length {
+            quote! {
+                let packet_length = #packet_length;
+                let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                let packet = &mut self.packet[off..end];
+            }
+        } else {
+            quote! {
+                let packet = &mut self.packet[off..];
+            }
+        };
+        let write_ops = if self.item_ty == "u8" {
+            quote! {
+                packet.copy_from_slice(vals)
+            }
+        } else {
+            let bytes_size = (self.item_bits + 7) / 8;
+            let write_ops = write_operations(
+                0,
+                self.item_bits,
+                self.endianness,
+                quote! { buf },
+                quote! { v },
+            );
+
+            quote!{
+                let buf = vals.iter().flat_map(|&v| {
+                    let mut buf = vec![0u8; #bytes_size];
+
+                    #write_ops
+
+                    buf.into_iter()
+                }).collect::<Vec<_>>();
+
+                packet.copy_from_slice(buf.as_slice())
+            }
+        };
+
+        quote_spanned! { self.span() =>
+            #[doc = #comment]
+            #[inline]
+            #[allow(trivial_numeric_casts)]
+            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+            pub fn #set_field(&mut self, vals: &[#item_ty]) {
+                let off = #current_offset;
+
+                #packet
+
+                #write_ops
+            }
+        }
+    }
+}
+
+struct CustomFieldMutator<'a> {
+    mutator: &'a FieldMutator<'a>,
+    arg_types: &'a [syn::Ident],
+}
+
+impl<'a> Deref for CustomFieldMutator<'a> {
+    type Target = FieldMutator<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mutator
+    }
+}
+
+impl<'a> Generator for CustomFieldMutator<'a> {
+    fn tokens(&self) -> TokenStream {
+        let field_name = &self.ident;
+        let field_ty = &self.ty;
+        let comment = format!("Set the value of the {} field", field_name);
+        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+
+        let setter = if self.arg_types.is_empty() {
+            let bytes_offset = self.length_funcs.bytes_offset();
+
+            quote_spanned! { self.span() =>
+                self.packet[#bytes_offset .. #bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
+            }
+        } else {
+            let mut set_args = vec![];
+            let mut length_funcs = Vec::from_iter(self.length_funcs.iter().cloned());
+
+            for (idx, arg_ty) in self.arg_types.iter().enumerate() {
+                let (bits, endianness) = parse_primitive(&arg_ty)
+                    .expect("arguments to #[construct_with] must be primitives");
+
+                let write_ops = write_operations(
+                    length_funcs.as_slice(),
+                    bits,
+                    endianness,
+                    quote! { self.packet },
+                    quote!{ vals.#idx },
+                );
+
+                set_args.push(quote! {
+                    #(#write_ops)*
+                });
+
+                length_funcs.push(Length::Bits(bits));
+            }
+
+            quote_spanned! { self.span() =>
+                #(#set_args)*
+            }
+        };
+
+        quote_spanned! { self.span() =>
+            #[doc = #comment]
+            #[inline]
+            #[allow(trivial_numeric_casts)]
+            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+            pub fn #set_field(&mut self, val: #field_ty) {
+                use pnet_macros_support::packet::PrimitiveValues;
+
+                let vals = val.to_primitive_values();
+
+                #setter
+            }
+        }
     }
 }
 
@@ -526,6 +991,648 @@ pub fn write_operations<O: ToBytesOffset, T: ToTokens, V: ToTokens>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    macro_rules! ident {
+        ($name:expr) => {
+            ident!($name, ::proc_macro2::Span::call_site())
+        };
+        ($name:expr, $span:expr) => {
+            ::syn::Ident::new($name, $span)
+        };
+    }
+
+    #[test]
+    fn test_primitive_field() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: u8,
+            }
+        };
+
+        let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(field.name(), "foo");
+        assert_eq!(field.as_primitive(), Some((8, Some(Endianness::Big))));
+
+        let length_funcs = &[Length::Bits(32)][..];
+
+        assert_eq!(
+            FieldAccessor::new(&field, true, length_funcs)
+                .tokens()
+                .to_string(),
+            quote! {
+                #[doc = "Get the foo field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_foo(&self) -> u8 {
+                    self.packet[4usize]
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&field, length_funcs).tokens().to_string(),
+            quote!{
+                #[doc = "Set the foo field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn set_foo(&mut self, val: u8 ) {
+                    self.packet[4usize] = val;
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_vec_field_with_length() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[length = 8]
+                body: Vec<u8>,
+
+                #[length = "8"]
+                body: Vec<u8>,
+
+                #[length = "4+4"]
+                body: Vec<u8>,
+
+                #[length = "self.pkt_len/2"]
+                body: Vec<u8>,
+            }
+        };
+
+        let mut iter = fields.named.into_iter();
+
+        let length_funcs = &[Length::Bits(16)][..];
+
+        // #[length = 8]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .unwrap(),
+                "8usize"
+            );
+
+            assert_eq!(
+                FieldAccessor::new(&field, true, length_funcs)
+                    .tokens()
+                    .to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = 8usize;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = 8usize;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = 8usize;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+
+            assert_eq!(
+                FieldMutator::new(&field, length_funcs).tokens().to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = 8usize;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+        }
+        // #[length = "8"]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .unwrap(),
+                "8"
+            );
+
+            assert_eq!(
+                FieldAccessor::new(&field, true, length_funcs)
+                    .tokens()
+                    .to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = 8;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = 8;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = 8;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+
+            assert_eq!(
+                FieldMutator::new(&field, length_funcs).tokens().to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = 8;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+        }
+        // #[length = "4+4"]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .unwrap(),
+                "4 + 4"
+            );
+
+            assert_eq!(
+                FieldAccessor::new(&field, true, length_funcs)
+                    .tokens()
+                    .to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = 4 + 4;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = 4 + 4;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = 4 + 4;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+
+            assert_eq!(
+                FieldMutator::new(&field, length_funcs).tokens().to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = 4 + 4;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+        }
+        // #[length = "self.pkt_len/2"]
+        {
+            let field = Field::parse(iter.next().unwrap()).unwrap();
+
+            assert_eq!(
+                field
+                    .as_vec()
+                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .unwrap(),
+                "self . pkt_len / 2"
+            );
+
+            assert_eq!(
+                FieldAccessor::new(&field, true, length_funcs)
+                    .tokens()
+                    .to_string(),
+                quote! {
+                    #[doc = "Get the raw &[u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw(&self) -> &[u8] {
+                        let off = 2usize;
+                        let packet_length = self.pkt_len / 2;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &self.packet[off..end]
+                    }
+
+                    #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
+                        let off = 2usize;
+                        let packet_length = self.pkt_len / 2;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                        &mut self.packet[off..end]
+                    }
+
+                    #[doc = "Get the value of the body field (copies contents)"]
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    pub fn get_body(&self) -> Vec<u8> {
+                        let off = 2usize;
+                        let packet_length = self.pkt_len / 2;
+                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                        let packet = &self.packet[off..end];
+
+                        packet.to_vec()
+                    }
+                }.to_string()
+            );
+
+            assert_eq!(
+                FieldMutator::new(&field, length_funcs).tokens().to_string(),
+                quote! {
+                   #[doc = "Set the value of the body field (copies contents)"]
+                   #[inline]
+                   #[allow(trivial_numeric_casts)]
+                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                   pub fn set_body(&mut self, vals: &[u8]) {
+                       let off = 2usize;
+                       let packet_length = self.pkt_len / 2;
+                       let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                       let packet = &mut self.packet[off..end];
+
+                       packet.copy_from_slice(vals)
+                   }
+                }.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn test_payload_field() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[payload]
+                body: Vec<u8>,
+            }
+        };
+
+        let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(field.name(), "body");
+        assert_eq!(
+            field.as_vec(),
+            Some((&ident!("u8"), 8, Some(Endianness::Big), None))
+        );
+
+        let length_funcs = &[Length::Bits(16)][..];
+
+        assert_eq!(
+            FieldAccessor::new(&field, false, length_funcs)
+                .tokens()
+                .to_string(),
+            quote! {
+                #[doc = "Get the value of the body field (copies contents)" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Vec <u8> {
+                    let off = 2usize;
+                    let packet = &self.packet[off..];
+                    packet.to_vec()
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&field, length_funcs).tokens().to_string(),
+            quote! {
+               #[doc = "Set the value of the body field (copies contents)"]
+               #[inline]
+               #[allow(trivial_numeric_casts)]
+               #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+               pub fn set_body(&mut self, vals: &[u8]) {
+                   let off = 2usize;
+                   let packet = &mut self.packet[off..];
+                   packet.copy_from_slice(vals)
+               }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_payload_field_with_u16() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[payload]
+                body: Vec<u16>,
+            }
+        };
+
+        let field = Field::parse(fields.named.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(field.name(), "body");
+        assert_eq!(
+            field.as_vec(),
+            Some((&ident!("u16"), 16, Some(Endianness::Big), None))
+        );
+
+        let length_funcs = &[Length::Bits(16)][..];
+
+        assert_eq!(
+            FieldAccessor::new(&field, false, length_funcs)
+                .tokens()
+                .to_string(),
+            quote! {
+                #[doc = "Get the value of the body field (copies contents)" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Vec <u16> {
+                    let off = 2usize;
+                    let packet = &self.packet[off..];
+                    packet.chunks(off).map(|chunk| {
+                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&chunk[0usize..])
+                    }).collect()
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&field, length_funcs).tokens().to_string(),
+            quote! {
+               #[doc = "Set the value of the body field (copies contents)"]
+               #[inline]
+               #[allow(trivial_numeric_casts)]
+               #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+               pub fn set_body(&mut self, vals: &[u16]) {
+                   let off = 2usize;
+                   let packet = &mut self.packet[off..];
+                   let buf = vals.iter().flat_map(|&v| {
+                       let mut buf = vec![0u8; 2usize];
+                       <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut buf[0usize..], v);
+                       buf.into_iter()
+                    }).collect::<Vec<_>>();
+
+                    packet.copy_from_slice(buf.as_slice())
+               }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_custom_field() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[construct_with(u16)]
+                pub hardware_type: ArpHardwareType,
+
+                #[construct_with(u8, u8, u8, u8, u8, u8)]
+                pub sender_hw_addr: MacAddr,
+
+                #[payload]
+                pub body: Body,
+            }
+        };
+
+        let mut iter = fields.named.into_iter();
+        let hardware_type = Field::parse(iter.next().unwrap()).unwrap();
+
+        assert_eq!(hardware_type.name(), "hardware_type");
+        assert_eq!(hardware_type.as_custom(), Some(&[ident!("u16")][..]));
+
+        let length_funcs = &[Length::Bits(16)][..];
+
+        assert_eq!(
+            FieldAccessor::new(&hardware_type, true, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc="Get the value of the hardware_type field" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_hardware_type(&self) -> ArpHardwareType {
+                    ArpHardwareType::new(
+                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[2usize..])
+                    )
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&hardware_type, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc="Set the value of the hardware_type field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
+                    use pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut self.packet[2usize..], vals.0usize);
+                }
+            }.to_string()
+        );
+
+        let sender_hw_addr = Field::parse(iter.next().unwrap()).unwrap();
+
+        assert_eq!(sender_hw_addr.name(), "sender_hw_addr");
+        assert_eq!(
+            sender_hw_addr.as_custom(),
+            Some(
+                &[
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8"),
+                    ident!("u8")
+                ][..],
+            )
+        );
+
+        assert_eq!(
+            FieldAccessor::new(&sender_hw_addr, true, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc="Get the value of the sender_hw_addr field" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_sender_hw_addr(&self) -> MacAddr {
+                    MacAddr::new(
+                        self.packet[2usize],
+                        self.packet[3usize],
+                        self.packet[4usize],
+                        self.packet[5usize],
+                        self.packet[6usize],
+                        self.packet[7usize]
+                    )
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&sender_hw_addr, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc="Set the value of the sender_hw_addr field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
+                    use pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+
+                    self.packet[2usize] = vals.0usize;
+                    self.packet[3usize] = vals.1usize;
+                    self.packet[4usize] = vals.2usize;
+                    self.packet[5usize] = vals.3usize;
+                    self.packet[6usize] = vals.4usize;
+                    self.packet[7usize] = vals.5usize;
+                }
+            }.to_string()
+        );
+
+        let body = Field::parse(iter.next().unwrap()).unwrap();
+
+        assert_eq!(body.name(), "body");
+        assert_eq!(body.as_custom(), Some(&[][..]));
+
+        assert_eq!(
+            FieldAccessor::new(&body, true, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc="Get the value of the body field" ]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn get_body(&self) -> Body {
+                    Body::new(&self.packet[2usize..])
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&body, length_funcs).tokens().to_string(),
+            quote!{
+                #[doc="Set the value of the body field"]
+                #[inline]
+                #[allow(trivial_numeric_casts)]
+                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
+                pub fn set_body(&mut self, val: Body) {
+                    use pnet_macros_support::packet::PrimitiveValues;
+                    let vals = val.to_primitive_values();
+
+                    self.packet[2usize..2usize + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
+                }
+            }.to_string()
+        );
+    }
 
     #[test]
     fn test_read_operations() {
