@@ -92,6 +92,10 @@ impl<'a> Generator for PacketGenerator<'a> {
                 (mutators, length_funcs)
             },
         );
+        let struct_size = fields
+            .iter()
+            .flat_map(|field| field.len())
+            .collect::<Vec<_>>();
 
         let packet_struct = PacketStruct {
             packet_name,
@@ -122,10 +126,7 @@ impl<'a> Generator for PacketGenerator<'a> {
         }.tokens();
         let packet_size = PacketSize {
             base_name,
-            packet_size: &fields
-                .iter()
-                .flat_map(|field| field.len())
-                .collect::<Vec<_>>(),
+            packet_size: &struct_size,
         }.tokens();
         let populate = Populate {
             base_name,
@@ -140,6 +141,10 @@ impl<'a> Generator for PacketGenerator<'a> {
             packet_name,
             mutable,
             payload_bounds: payload_bounds.expect("#[packet] must contain a payload field"),
+        }.tokens();
+        let impl_packet_size_trait = ImplPacketSizeTrait {
+            packet_name,
+            packet_size: &struct_size,
         }.tokens();
         let impl_from_packet_trait = ImplFromPacketTrait {
             base_name,
@@ -183,6 +188,8 @@ impl<'a> Generator for PacketGenerator<'a> {
             #impl_debug_trait
 
             #impl_packet_trait
+
+            #impl_packet_size_trait
 
             #impl_from_packet_trait
 
@@ -497,6 +504,28 @@ impl<'a> Generator for ImplPacketTrait<'a> {
             #impl_packet_trait
 
             #impl_mutable_packet_trait
+        }
+    }
+}
+
+struct ImplPacketSizeTrait<'a> {
+    packet_name: &'a syn::Ident,
+    packet_size: &'a [Length],
+}
+
+impl<'a> Generator for ImplPacketSizeTrait<'a> {
+    fn tokens(&self) -> TokenStream {
+        let packet_name = self.packet_name;
+        let packet_size = self.packet_size.bytes_offset();
+
+        quote! {
+            impl<'a> ::pnet_macros_support::packet::PacketSize for #packet_name<'a> {
+                fn packet_size(&self) -> usize {
+                    let packet = self;
+
+                    #packet_size
+                }
+            }
         }
     }
 }
@@ -1630,6 +1659,29 @@ mod tests {
     }
 
     #[test]
+    fn test_impl_packet_size_trait() {
+        assert_eq!(
+            ImplPacketSizeTrait {
+                packet_name: &ident!("FooPacket"),
+                packet_size: &[
+                    Length::Bits(512),
+                    Length::Expr(parse_quote! { packet.body.len() }),
+                ],
+            }.tokens()
+                .to_string(),
+            quote!{
+                impl<'a> ::pnet_macros_support::packet::PacketSize for FooPacket<'a> {
+                    fn packet_size(&self) -> usize {
+                        let packet = self;
+
+                        64usize + (packet.body.len())
+                    }
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
     fn test_impl_from_packet_trait() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
@@ -1926,6 +1978,13 @@ mod tests {
                     }
                 }
             }
+            impl<'a> ::pnet_macros_support::packet::PacketSize for FooPacket<'a> {
+                fn packet_size(&self) -> usize {
+                    let packet = self;
+
+                    13usize + (packet.body.len())
+                }
+            }
             impl<'p> ::pnet_macros_support::packet::FromPacket for FooPacket<'p> {
                 type T = Foo;
 
@@ -2167,6 +2226,13 @@ mod tests {
                     } else {
                         &mut self.packet[start..]
                     }
+                }
+            }
+            impl<'a> ::pnet_macros_support::packet::PacketSize for MutableFooPacket<'a> {
+                fn packet_size(&self) -> usize {
+                    let packet = self;
+
+                    13usize + (packet.body.len())
                 }
             }
             impl<'p> ::pnet_macros_support::packet::FromPacket for MutableFooPacket<'p> {
