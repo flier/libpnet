@@ -423,7 +423,6 @@ impl<'a> Generator for Populate<'a> {
         quote! {
             #[doc = #comment]
             #[inline]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn populate(&mut self, packet: &#base_name) {
                 #(#set_fields)*
             }
@@ -597,7 +596,6 @@ impl<'a> Generator for ImplDebugTrait<'a> {
 
         quote! {
             impl<'p> ::std::fmt::Debug for #packet_name<'p> {
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                     write!(
                         fmt,
@@ -735,7 +733,6 @@ This field is always stored in {} endianness within the struct, but this accesso
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #get_field(&self) -> #field_ty {
                 #(#read_ops)*
             }
@@ -802,7 +799,6 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
                 #[doc = #comment]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn #get_field_raw(&self) -> &[u8] {
                     let off = #current_offset;
                     let packet_length = #packet_length;
@@ -824,7 +820,6 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
                 #[doc = #comment]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn #get_field_raw_mut(&mut self) -> &mut [u8] {
                     let off = #current_offset;
                     let packet_length = #packet_length;
@@ -894,7 +889,6 @@ impl<'a> Generator for PrimitiveVecFieldAccessor<'a> {
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #get_field(&self) -> Vec<#item_ty> {
                 let off = #current_offset;
 
@@ -964,7 +958,6 @@ impl<'a> Generator for CustomFieldAccessor<'a> {
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #get_field(&self) -> #field_ty {
                 #ctor
             }
@@ -1057,7 +1050,6 @@ This field is always stored in {} endianness within the struct, but this accesso
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #set_field(&mut self, val: #field_ty) {
                 #(#write_ops)*
             }
@@ -1133,7 +1125,6 @@ impl<'a> Generator for VecFieldMutator<'a> {
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #set_field(&mut self, vals: &[#item_ty]) {
                 let off = #current_offset;
 
@@ -1203,7 +1194,6 @@ impl<'a> Generator for CustomFieldMutator<'a> {
             #[doc = #comment]
             #[inline]
             #[allow(trivial_numeric_casts)]
-            #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
             pub fn #set_field(&mut self, val: #field_ty) {
                 use ::pnet_macros_support::packet::PrimitiveValues;
 
@@ -1532,7 +1522,6 @@ mod tests {
             quote!{
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn populate(&mut self, packet: &Foo) {
                     self.set_foo(packet.foo);
                     self.set_data(&packet.data);
@@ -1568,7 +1557,6 @@ mod tests {
                 .to_string(),
             quote! {
                 impl<'p> ::std::fmt::Debug for FooPacket<'p> {
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                         write!(
                             fmt,
@@ -1792,21 +1780,18 @@ mod tests {
                 #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_flags(&self) -> u8 {
                     self.packet[0usize]
                 }
                 #[doc = "Get the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_length(&self) -> u32 {
                     <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u32(&self.packet[1usize..])
                 }
                 #[doc = "Get the value of the hardware_type field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_hardware_type(&self) -> ArpHardwareType {
                     ArpHardwareType::new(
                         <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[5usize..])
@@ -1815,7 +1800,6 @@ mod tests {
                 #[doc = "Get the value of the sender_hw_addr field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_sender_hw_addr(&self) -> MacAddr {
                     MacAddr::new(
                         self.packet[7usize],
@@ -1829,7 +1813,6 @@ mod tests {
                 #[doc = "Get the value of the body field (copies contents)"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Vec<u8> {
                     let off = 13usize;
                     let packet = &self.packet[off..];
@@ -1838,14 +1821,12 @@ mod tests {
                 #[doc = "Set the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_flags(&mut self, val: u8) {
                     self.packet[0usize] = val;
                 }
                 #[doc = "Set the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_length(&mut self, val: u32) {
                     <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u32(
                         &mut self.packet[1usize..],
@@ -1855,7 +1836,6 @@ mod tests {
                 #[doc = "Set the value of the hardware_type field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
@@ -1867,7 +1847,6 @@ mod tests {
                 #[doc = "Set the value of the sender_hw_addr field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
@@ -1881,7 +1860,6 @@ mod tests {
                 #[doc = "Set the value of the body field (copies contents)"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_body(&mut self, vals: &[u8]) {
                     let off = 13usize;
                     let packet = &mut self.packet[off..];
@@ -1938,7 +1916,6 @@ mod tests {
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn populate(&mut self, packet: &Foo) {
                     self.set_flags(packet.flags);
                     self.set_length(packet.length);
@@ -1948,7 +1925,6 @@ mod tests {
                 }
             }
             impl<'p> ::std::fmt::Debug for FooPacket<'p> {
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                     write!(
                         fmt,
@@ -2025,21 +2001,18 @@ mod tests {
                 #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_flags(&self) -> u8 {
                     self.packet[0usize]
                 }
                 #[doc = "Get the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_length(&self) -> u32 {
                     <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u32(&self.packet[1usize..])
                 }
                 #[doc = "Get the value of the hardware_type field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_hardware_type(&self) -> ArpHardwareType {
                     ArpHardwareType::new(
                         <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[5usize..])
@@ -2048,7 +2021,6 @@ mod tests {
                 #[doc = "Get the value of the sender_hw_addr field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_sender_hw_addr(&self) -> MacAddr {
                     MacAddr::new(
                         self.packet[7usize],
@@ -2062,7 +2034,6 @@ mod tests {
                 #[doc = "Get the value of the body field (copies contents)"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Vec<u8> {
                     let off = 13usize;
                     let packet = &self.packet[off..];
@@ -2071,14 +2042,12 @@ mod tests {
                 #[doc = "Set the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_flags(&mut self, val: u8) {
                     self.packet[0usize] = val;
                 }
                 #[doc = "Set the length field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_length(&mut self, val: u32) {
                     <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u32(
                         &mut self.packet[1usize..],
@@ -2088,7 +2057,6 @@ mod tests {
                 #[doc = "Set the value of the hardware_type field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
@@ -2100,7 +2068,6 @@ mod tests {
                 #[doc = "Set the value of the sender_hw_addr field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
@@ -2114,7 +2081,6 @@ mod tests {
                 #[doc = "Set the value of the body field (copies contents)"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_body(&mut self, vals: &[u8]) {
                     let off = 13usize;
                     let packet = &mut self.packet[off..];
@@ -2171,7 +2137,6 @@ mod tests {
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn populate(&mut self, packet: &Foo) {
                     self.set_flags(packet.flags);
                     self.set_length(packet.length);
@@ -2181,7 +2146,6 @@ mod tests {
                 }
             }
             impl<'p> ::std::fmt::Debug for MutableFooPacket<'p> {
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                     write!(
                         fmt,
@@ -2348,7 +2312,6 @@ mod tests {
                 #[doc = "Get the foo field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn get_foo(&self) -> u8 {
                     self.packet[4usize]
                 }
@@ -2361,7 +2324,6 @@ mod tests {
                 #[doc = "Set the foo field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn set_foo(&mut self, val: u8 ) {
                     self.packet[4usize] = val;
                 }
@@ -2411,7 +2373,6 @@ mod tests {
                     #[doc = "Get the raw &[u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
                         let packet_length = 8usize;
@@ -2423,7 +2384,6 @@ mod tests {
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
                         let packet_length = 8usize;
@@ -2435,7 +2395,6 @@ mod tests {
                     #[doc = "Get the value of the body field (copies contents)"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
                         let packet_length = 8usize;
@@ -2453,7 +2412,6 @@ mod tests {
                    #[doc = "Set the value of the body field (copies contents)"]
                    #[inline]
                    #[allow(trivial_numeric_casts)]
-                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
                        let packet_length = 8usize;
@@ -2485,7 +2443,6 @@ mod tests {
                     #[doc = "Get the raw &[u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
                         let packet_length = ( 8 );
@@ -2497,7 +2454,6 @@ mod tests {
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
                         let packet_length = ( 8 );
@@ -2509,7 +2465,6 @@ mod tests {
                     #[doc = "Get the value of the body field (copies contents)"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
                         let packet_length = ( 8 );
@@ -2527,7 +2482,6 @@ mod tests {
                    #[doc = "Set the value of the body field (copies contents)"]
                    #[inline]
                    #[allow(trivial_numeric_casts)]
-                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
                        let packet_length = ( 8 );
@@ -2559,7 +2513,6 @@ mod tests {
                     #[doc = "Get the raw &[u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
                         let packet_length = ( 4 + 4 );
@@ -2571,7 +2524,6 @@ mod tests {
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
                         let packet_length = ( 4 + 4 );
@@ -2583,7 +2535,6 @@ mod tests {
                     #[doc = "Get the value of the body field (copies contents)"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
                         let packet_length = ( 4 + 4 );
@@ -2601,7 +2552,6 @@ mod tests {
                    #[doc = "Set the value of the body field (copies contents)"]
                    #[inline]
                    #[allow(trivial_numeric_casts)]
-                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
                        let packet_length = ( 4 + 4 );
@@ -2633,7 +2583,6 @@ mod tests {
                     #[doc = "Get the raw &[u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw(&self) -> &[u8] {
                         let off = 2usize;
                         let packet_length = ( self . pkt_len / 2 );
@@ -2645,7 +2594,6 @@ mod tests {
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body_raw_mut(&mut self) -> &mut [u8] {
                         let off = 2usize;
                         let packet_length = ( self . pkt_len / 2 );
@@ -2657,7 +2605,6 @@ mod tests {
                     #[doc = "Get the value of the body field (copies contents)"]
                     #[inline]
                     #[allow(trivial_numeric_casts)]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     pub fn get_body(&self) -> Vec<u8> {
                         let off = 2usize;
                         let packet_length = ( self . pkt_len / 2 );
@@ -2675,7 +2622,6 @@ mod tests {
                    #[doc = "Set the value of the body field (copies contents)"]
                    #[inline]
                    #[allow(trivial_numeric_casts)]
-                   #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                    pub fn set_body(&mut self, vals: &[u8]) {
                        let off = 2usize;
                        let packet_length = ( self . pkt_len / 2 );
@@ -2716,7 +2662,6 @@ mod tests {
                 #[doc = "Get the value of the body field (copies contents)" ]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Vec <u8> {
                     let off = 2usize;
                     let packet = &self.packet[off..];
@@ -2731,7 +2676,6 @@ mod tests {
                #[doc = "Set the value of the body field (copies contents)"]
                #[inline]
                #[allow(trivial_numeric_casts)]
-               #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                pub fn set_body(&mut self, vals: &[u8]) {
                    let off = 2usize;
                    let packet = &mut self.packet[off..];
@@ -2768,7 +2712,6 @@ mod tests {
                 #[doc = "Get the value of the body field (copies contents)" ]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Vec <u16> {
                     let off = 2usize;
                     let packet = &self.packet[off..];
@@ -2785,7 +2728,6 @@ mod tests {
                #[doc = "Set the value of the body field (copies contents)"]
                #[inline]
                #[allow(trivial_numeric_casts)]
-               #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                pub fn set_body(&mut self, vals: &[u16]) {
                    let off = 2usize;
                    let packet = &mut self.packet[off..];
@@ -2832,7 +2774,6 @@ mod tests {
                 #[doc="Get the value of the hardware_type field" ]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn get_hardware_type(&self) -> ArpHardwareType {
                     ArpHardwareType::new(
                         <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&self.packet[2usize..])
@@ -2849,7 +2790,6 @@ mod tests {
                 #[doc="Set the value of the hardware_type field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn set_hardware_type(&mut self, val: ArpHardwareType) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
@@ -2884,7 +2824,6 @@ mod tests {
                 #[doc="Get the value of the sender_hw_addr field" ]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn get_sender_hw_addr(&self) -> MacAddr {
                     MacAddr::new(
                         self.packet[2usize],
@@ -2906,7 +2845,6 @@ mod tests {
                 #[doc="Set the value of the sender_hw_addr field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn set_sender_hw_addr(&mut self, val: MacAddr) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
@@ -2934,7 +2872,6 @@ mod tests {
                 #[doc="Get the value of the body field" ]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn get_body(&self) -> Body {
                     Body::new(&self.packet[2usize..])
                 }
@@ -2947,7 +2884,6 @@ mod tests {
                 #[doc="Set the value of the body field"]
                 #[inline]
                 #[allow(trivial_numeric_casts)]
-                #[cfg_attr(feature="clippy", allow(used_underscore_binding))]
                 pub fn set_body(&mut self, val: Body) {
                     use ::pnet_macros_support::packet::PrimitiveValues;
                     let vals = val.to_primitive_values();
