@@ -122,15 +122,6 @@ impl<'a> Generator for PacketGenerator<'a> {
             },
         );
 
-        let bits_length_funcs = fields
-            .iter()
-            .flat_map(|field| field.bits())
-            .collect::<Vec<_>>();
-        let struct_length_funcs = fields
-            .iter()
-            .flat_map(|field| field.len())
-            .collect::<Vec<_>>();
-
         let new = New {
             packet_name,
             packet_data,
@@ -148,8 +139,19 @@ impl<'a> Generator for PacketGenerator<'a> {
             immutable_packet_name,
             mutable_packet_name,
         }.tokens();
-        let minimum_packet_size = MinimumPacketSize(self, &bits_length_funcs).tokens();
-        let packet_size = PacketSize(self, &struct_length_funcs).tokens();
+        let minimum_packet_size = MinimumPacketSize {
+            packet_size: &fields
+                .iter()
+                .flat_map(|field| field.bits())
+                .collect::<Vec<_>>(),
+        }.tokens();
+        let packet_size = PacketSize {
+            base_name,
+            packet_size: &fields
+                .iter()
+                .flat_map(|field| field.len())
+                .collect::<Vec<_>>(),
+        }.tokens();
         let populate = Populate {
             base_name,
             mutable_packet_name,
@@ -315,15 +317,17 @@ impl<'a> Generator for ConsumeToImmutable<'a> {
     }
 }
 
-struct MinimumPacketSize<'a>(&'a PacketGenerator<'a>, &'a [Length]);
+struct MinimumPacketSize<'a> {
+    packet_size: &'a [Length],
+}
 
 impl<'a> Generator for MinimumPacketSize<'a> {
     fn tokens(&self) -> TokenStream {
-        let packet_size = self.1.bytes_offset();
+        let packet_size = self.packet_size.bytes_offset();
 
         quote! {
-            /// The minimum size (in bytes) a packet of this type can be. It's based on the total size
-            /// of the fixed-size fields.
+            /// The minimum size (in bytes) a packet of this type can be.
+            /// It's based on the total size of the fixed-size fields.
             #[inline]
             pub fn minimum_packet_size() -> usize {
                 #packet_size
@@ -332,21 +336,24 @@ impl<'a> Generator for MinimumPacketSize<'a> {
     }
 }
 
-struct PacketSize<'a>(&'a PacketGenerator<'a>, &'a [Length]);
+struct PacketSize<'a> {
+    base_name: &'a syn::Ident,
+    packet_size: &'a [Length],
+}
 
 impl<'a> Generator for PacketSize<'a> {
     fn tokens(&self) -> TokenStream {
-        let base_name = self.0.base_name();
+        let base_name = self.base_name;
         let comment = format!(
             "The size (in bytes) of a {} instance when converted into a byte-array",
             base_name
         );
-        let packet_size = self.1.bytes_offset();
+        let packet_size = self.packet_size.bytes_offset();
 
         quote! {
             #[doc = #comment]
             #[inline]
-            pub fn packet_size(_packet: &#base_name) -> usize {
+            pub fn packet_size(packet: &#base_name) -> usize {
                 #packet_size
             }
         }
@@ -1260,6 +1267,45 @@ mod tests {
     }
 
     #[test]
+    fn test_minimum_packet_size() {
+        assert_eq!(
+            MinimumPacketSize {
+                packet_size: &[Length::Bits(512)]
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[doc = r" The minimum size (in bytes) a packet of this type can be."]
+                #[doc = r" It's based on the total size of the fixed-size fields."]
+                #[inline]
+                pub fn minimum_packet_size() -> usize {
+                    64usize
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_packet_size() {
+        assert_eq!(
+            PacketSize {
+                base_name: &ident!("Foo"),
+                packet_size: &[
+                    Length::Bits(512),
+                    Length::Expr(parse_quote! { packet.body.len() }),
+                ],
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
+                #[inline]
+                pub fn packet_size(packet: &Foo) -> usize {
+                    64usize + (packet.body.len())
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
     fn test_populate() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
@@ -1522,16 +1568,16 @@ mod tests {
                         packet: self.packet.to_immutable(),
                     }
                 }
-                #[doc = r" The minimum size (in bytes) a packet of this type can be. It's based on the total size"]
-                #[doc = r" of the fixed-size fields."]
+                #[doc = r" The minimum size (in bytes) a packet of this type can be."]
+                #[doc = r" It's based on the total size of the fixed-size fields."]
                 #[inline]
                 pub fn minimum_packet_size() -> usize {
                     13usize
                 }
                 #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
                 #[inline]
-                pub fn packet_size(_packet: &Foo) -> usize {
-                    13usize + (self.packet.body.len())
+                pub fn packet_size(packet: &Foo) -> usize {
+                    13usize + (packet.body.len())
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
@@ -1697,16 +1743,16 @@ mod tests {
                         packet: self.packet.to_immutable(),
                     }
                 }
-                #[doc = r" The minimum size (in bytes) a packet of this type can be. It's based on the total size"]
-                #[doc = r" of the fixed-size fields."]
+                #[doc = r" The minimum size (in bytes) a packet of this type can be."]
+                #[doc = r" It's based on the total size of the fixed-size fields."]
                 #[inline]
                 pub fn minimum_packet_size() -> usize {
                     13usize
                 }
                 #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
                 #[inline]
-                pub fn packet_size(_packet: &Foo) -> usize {
-                    13usize + (self.packet.body.len())
+                pub fn packet_size(packet: &Foo) -> usize {
+                    13usize + (packet.body.len())
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]

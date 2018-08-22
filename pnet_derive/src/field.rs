@@ -205,7 +205,7 @@ impl Field {
             Kind::Vec { .. } => {
                 let field_name = self.name();
 
-                Some(Length::Expr(parse_quote!{ self.packet.#field_name.len() }))
+                Some(Length::Expr(parse_quote!{ packet.#field_name.len() }))
             }
             Kind::Custom { ref construct_with } => Some(Length::Bits(
                 construct_with
