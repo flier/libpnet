@@ -136,7 +136,10 @@ impl<'a> Generator for PacketGenerator<'a> {
             packet_data,
             mutable,
         }.tokens();
-        let owned = Owned(self).tokens();
+        let owned = Owned {
+            packet_name,
+            packet_data,
+        }.tokens();
         let to_immutable = ToImmutable(self).tokens();
         let consume_to_immutable = ConsumeToImmutable(self).tokens();
         let minimum_packet_size = MinimumPacketSize(self, &bits_length_funcs).tokens();
@@ -215,12 +218,15 @@ If the provided buffer is less than the minimum required packet size, this will 
     }
 }
 
-struct Owned<'a>(&'a PacketGenerator<'a>);
+struct Owned<'a> {
+    packet_name: &'a syn::Ident,
+    packet_data: &'a syn::Ident,
+}
 
 impl<'a> Generator for Owned<'a> {
     fn tokens(&self) -> TokenStream {
-        let packet_name = self.0.packet_name();
-        let packet_data = self.0.packet_data();
+        let packet_name = self.packet_name;
+        let packet_data = self.packet_data;
 
         let comment = format!(
             "Constructs a new {0}.
@@ -1156,6 +1162,28 @@ mod tests {
                     if packet.len() >= MutableFooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::MutPacketData;
                         Some(MutableFooPacket { packet: MutPacketData::Borrowed(packet) })
+                    } else {
+                        None
+                    }
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_owned() {
+        assert_eq!(
+            Owned {
+                packet_name: &ident!("FooPacket"),
+                packet_data: &ident!("PacketData"),
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[doc = "Constructs a new FooPacket.\nIf the provided buffer is less than the minimum required packet size,\nthis will return None. With this constructor the FooPacket will own its own data\nand the underlying buffer will be dropped when the FooPacket is."]
+                pub fn owned(packet: Vec<u8>) -> Option<FooPacket<'static>> {
+                    if packet.len() >= FooPacket::minimum_packet_size() {
+                        use ::pnet_macros_support::packet::PacketData;
+                        Some(FooPacket { packet: PacketData::Owned(packet) })
                     } else {
                         None
                     }
