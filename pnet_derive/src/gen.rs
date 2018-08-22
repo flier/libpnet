@@ -92,6 +92,10 @@ impl<'a> Generator for PacketGenerator<'a> {
             },
         );
 
+        let packet_struct = PacketStruct {
+            packet_name,
+            packet_data,
+        }.tokens();
         let new = New {
             packet_name,
             packet_data,
@@ -149,6 +153,8 @@ impl<'a> Generator for PacketGenerator<'a> {
         };
 
         quote! {
+            #packet_struct
+
             impl<'a> #packet_name<'a> {
                 #(#accessors)*
 
@@ -174,6 +180,26 @@ impl<'a> Generator for PacketGenerator<'a> {
             #impl_from_packet_trait
 
             #impl_packet_iterator
+        }
+    }
+}
+
+struct PacketStruct<'a> {
+    packet_name: &'a syn::Ident,
+    packet_data: &'a syn::Ident,
+}
+
+impl<'a> Generator for PacketStruct<'a> {
+    fn tokens(&self) -> TokenStream {
+        let packet_name = self.packet_name;
+        let packet_data = self.packet_data;
+
+        quote! {
+            #[derive(PartialEq)]
+            /// A structure enabling manipulation of on the wire packets
+            pub struct #packet_name<'p> {
+                packet: ::pnet_macros_support::packet::#packet_data<'p>,
+            }
         }
     }
 }
@@ -1221,6 +1247,24 @@ mod tests {
     }
 
     #[test]
+    fn test_packet_struct() {
+        assert_eq!(
+            PacketStruct {
+                packet_name: &ident!("FooPacket"),
+                packet_data: &ident!("PacketData"),
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[derive(PartialEq)]
+                #[doc = r" A structure enabling manipulation of on the wire packets"]
+                pub struct FooPacket<'p> {
+                    packet: ::pnet_macros_support::packet::PacketData<'p>,
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
     fn test_new() {
         assert_eq!(
             New {
@@ -1574,6 +1618,12 @@ mod tests {
 
         let generated = packet.into_token_stream().to_string();
         let expected = quote!{
+            #[derive(PartialEq)]
+            #[doc = r" A structure enabling manipulation of on the wire packets"]
+            pub struct FooPacket<'p> {
+                packet: ::pnet_macros_support::packet::PacketData<'p>,
+            }
+
             impl<'a> FooPacket<'a> {
                 #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
@@ -1782,6 +1832,13 @@ mod tests {
                     None
                 }
             }
+
+            #[derive(PartialEq)]
+            #[doc = r" A structure enabling manipulation of on the wire packets"]
+            pub struct MutableFooPacket<'p> {
+                packet: ::pnet_macros_support::packet::MutPacketData<'p>,
+            }
+
             impl<'a> MutableFooPacket<'a> {
                 #[doc = "Get the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
@@ -1974,7 +2031,7 @@ mod tests {
             }
         }.to_string();
 
-        //assert_eq!(generated, expected);
+        assert_eq!(generated, expected);
 
         let mut diffs = diff::chars(generated.as_str(), expected.as_str())
             .into_iter()
