@@ -1,8 +1,7 @@
-use proc_macro2::{Span, TokenStream};
-use quote::{ToTokens, TokenStreamExt};
+use proc_macro2::Span;
+use quote::ToTokens;
 use syn;
 
-use gen::{read_operations, write_operations};
 use types::{parse_primitive, Endianness, Length, Result};
 
 #[derive(Clone, Debug, PartialEq)]

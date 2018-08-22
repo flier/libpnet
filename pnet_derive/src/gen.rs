@@ -1,10 +1,9 @@
-use std::cell::RefCell;
 use std::iter::FromIterator;
 use std::ops::{Deref, Range, RangeFrom};
 
 use either::Either;
 use proc_macro2::{Span, TokenStream};
-use quote::{ToTokens, TokenStreamExt};
+use quote::ToTokens;
 use syn;
 
 use field::{Field, Kind};
@@ -79,11 +78,15 @@ impl<'a> PacketGenerator<'a> {
 
 impl<'a> Generator for PacketGenerator<'a> {
     fn tokens(&self) -> TokenStream {
+        let base_name = &self.base_name();
         let packet_name = &self.packet_name();
+        let immutable_packet_name = &self.immutable_packet_name();
+        let mutable_packet_name = &self.mutable_packet_name();
         let mutable = self.mutable;
+        let fields = &self.packet.fields;
         let mut payload_bounds = None;
 
-        let (accessors, _) = self.packet.fields.iter().fold(
+        let (accessors, _) = fields.iter().fold(
             (vec![], vec![]),
             |(mut accessors, mut length_funcs), field| {
                 accessors.push(FieldAccessor::new(field, self.mutable, &length_funcs).tokens());
@@ -107,7 +110,7 @@ impl<'a> Generator for PacketGenerator<'a> {
             },
         );
 
-        let (mutators, _) = self.packet.fields.iter().fold(
+        let (mutators, _) = fields.iter().fold(
             (vec![], vec![]),
             |(mut mutators, mut length_funcs), field| {
                 mutators.push(FieldMutator::new(field, &length_funcs).tokens());
@@ -118,15 +121,11 @@ impl<'a> Generator for PacketGenerator<'a> {
             },
         );
 
-        let bits_length_funcs = self
-            .packet
-            .fields
+        let bits_length_funcs = fields
             .iter()
             .flat_map(|field| field.bits())
             .collect::<Vec<_>>();
-        let struct_length_funcs = self
-            .packet
-            .fields
+        let struct_length_funcs = fields
             .iter()
             .flat_map(|field| field.len())
             .collect::<Vec<_>>();
@@ -137,7 +136,11 @@ impl<'a> Generator for PacketGenerator<'a> {
         let consume_to_immutable = ConsumeToImmutable(self).tokens();
         let minimum_packet_size = MinimumPacketSize(self, &bits_length_funcs).tokens();
         let packet_size = PacketSize(self, &struct_length_funcs).tokens();
-        let populate = Populate(self).tokens();
+        let populate = Populate {
+            base_name,
+            mutable_packet_name,
+            fields,
+        }.tokens();
         let impl_packet_trait = ImplPacketTrait {
             packet_name,
             mutable,
@@ -315,19 +318,22 @@ impl<'a> Generator for PacketSize<'a> {
     }
 }
 
-struct Populate<'a>(&'a PacketGenerator<'a>);
+struct Populate<'a> {
+    base_name: &'a syn::Ident,
+    mutable_packet_name: &'a syn::Ident,
+    fields: &'a [Field],
+}
 
 impl<'a> Generator for Populate<'a> {
     fn tokens(&self) -> TokenStream {
-        let base_name = self.0.base_name();
+        let base_name = self.base_name;
 
         let comment = format!(
             "Populates a {} using a {} structure",
-            self.0.mutable_packet_name(),
-            base_name
+            self.mutable_packet_name, base_name
         );
 
-        let set_fields = self.0.packet.fields.iter().map(|field| {
+        let set_fields = self.fields.iter().map(|field| {
             let field_name = &field.name();
             let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
 
@@ -1105,16 +1111,54 @@ mod tests {
     }
 
     #[test]
+    fn test_populate() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: u8,
+                #[length = 8]
+                data: Vec<u8>,
+                #[payload]
+                payload: Vec<u8>,
+            }
+        };
+        let fields = fields
+            .named
+            .into_iter()
+            .map(Field::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            Populate {
+                base_name: &ident!("Foo"),
+                mutable_packet_name: &ident!("MutableFooPacket"),
+                fields: &fields,
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[doc = "Populates a MutableFooPacket using a Foo structure"]
+                #[inline]
+                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                pub fn populate(&self, packet: &Foo) {
+                    self.set_foo(packet.foo);
+                    self.set_data(&packet.data);
+                    self.set_payload(&packet.payload);
+                }
+            }.to_string()
+        )
+    }
+
+    #[test]
     fn test_impl_packet_trait() {
         assert_eq!(
             ImplPacketTrait {
-                packet_name: &ident!("Foo"),
+                packet_name: &ident!("FooPacket"),
                 mutable: false,
                 payload_bounds: Either::Right(vec![]..),
             }.tokens()
                 .to_string(),
             quote! {
-                impl<'a> ::pnet_macros_support::packet::Packet for Foo<'a> {
+                impl<'a> ::pnet_macros_support::packet::Packet for FooPacket<'a> {
                     #[inline]
                     fn packet<'p>(&'p self) -> &'p [u8] {
                         &self.packet[..]
