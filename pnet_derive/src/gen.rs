@@ -92,6 +92,10 @@ impl<'a> Generator for PacketGenerator<'a> {
                 (mutators, length_funcs)
             },
         );
+        let fields_size = fields
+            .iter()
+            .flat_map(|field| field.bits())
+            .collect::<Vec<_>>();
         let struct_size = fields
             .iter()
             .flat_map(|field| field.len())
@@ -119,10 +123,7 @@ impl<'a> Generator for PacketGenerator<'a> {
             mutable_packet_name,
         }.tokens();
         let minimum_packet_size = MinimumPacketSize {
-            packet_size: &fields
-                .iter()
-                .flat_map(|field| field.bits())
-                .collect::<Vec<_>>(),
+            packet_size: &fields_size,
         }.tokens();
         let packet_size = PacketSize {
             base_name,
@@ -144,7 +145,7 @@ impl<'a> Generator for PacketGenerator<'a> {
         }.tokens();
         let impl_packet_size_trait = ImplPacketSizeTrait {
             packet_name,
-            packet_size: &struct_size,
+            packet_size: &fields_size,
         }.tokens();
         let impl_from_packet_trait = ImplFromPacketTrait {
             base_name,
@@ -423,7 +424,7 @@ impl<'a> Generator for Populate<'a> {
             #[doc = #comment]
             #[inline]
             #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-            pub fn populate(&self, packet: &#base_name) {
+            pub fn populate(&mut self, packet: &#base_name) {
                 #(#set_fields)*
             }
         }
@@ -521,8 +522,6 @@ impl<'a> Generator for ImplPacketSizeTrait<'a> {
         quote! {
             impl<'a> ::pnet_macros_support::packet::PacketSize for #packet_name<'a> {
                 fn packet_size(&self) -> usize {
-                    let packet = self;
-
                     #packet_size
                 }
             }
@@ -1534,7 +1533,7 @@ mod tests {
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                pub fn populate(&self, packet: &Foo) {
+                pub fn populate(&mut self, packet: &Foo) {
                     self.set_foo(packet.foo);
                     self.set_data(&packet.data);
                     self.set_payload(&packet.payload);
@@ -1665,16 +1664,15 @@ mod tests {
                 packet_name: &ident!("FooPacket"),
                 packet_size: &[
                     Length::Bits(512),
-                    Length::Expr(parse_quote! { packet.body.len() }),
+                    Length::Func(ident!("ipv4_options_length")),
+                    Length::Func(ident!("ipv4_payload_length")),
                 ],
             }.tokens()
                 .to_string(),
             quote!{
                 impl<'a> ::pnet_macros_support::packet::PacketSize for FooPacket<'a> {
                     fn packet_size(&self) -> usize {
-                        let packet = self;
-
-                        64usize + (packet.body.len())
+                        64usize + ipv4_options_length(&self.to_immutable()) + ipv4_payload_length(&self.to_immutable())
                     }
                 }
             }.to_string()
@@ -1941,7 +1939,7 @@ mod tests {
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                pub fn populate(&self, packet: &Foo) {
+                pub fn populate(&mut self, packet: &Foo) {
                     self.set_flags(packet.flags);
                     self.set_length(packet.length);
                     self.set_hardware_type(packet.hardware_type);
@@ -1980,9 +1978,7 @@ mod tests {
             }
             impl<'a> ::pnet_macros_support::packet::PacketSize for FooPacket<'a> {
                 fn packet_size(&self) -> usize {
-                    let packet = self;
-
-                    13usize + (packet.body.len())
+                    13usize
                 }
             }
             impl<'p> ::pnet_macros_support::packet::FromPacket for FooPacket<'p> {
@@ -2176,7 +2172,7 @@ mod tests {
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
                 #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                pub fn populate(&self, packet: &Foo) {
+                pub fn populate(&mut self, packet: &Foo) {
                     self.set_flags(packet.flags);
                     self.set_length(packet.length);
                     self.set_hardware_type(packet.hardware_type);
@@ -2230,9 +2226,7 @@ mod tests {
             }
             impl<'a> ::pnet_macros_support::packet::PacketSize for MutableFooPacket<'a> {
                 fn packet_size(&self) -> usize {
-                    let packet = self;
-
-                    13usize + (packet.body.len())
+                    13usize
                 }
             }
             impl<'p> ::pnet_macros_support::packet::FromPacket for MutableFooPacket<'p> {
