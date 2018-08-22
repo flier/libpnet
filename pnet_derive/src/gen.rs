@@ -140,8 +140,14 @@ impl<'a> Generator for PacketGenerator<'a> {
             packet_name,
             packet_data,
         }.tokens();
-        let to_immutable = ToImmutable(self).tokens();
-        let consume_to_immutable = ConsumeToImmutable(self).tokens();
+        let to_immutable = ToImmutable {
+            immutable_packet_name,
+            mutable_packet_name,
+        }.tokens();
+        let consume_to_immutable = ConsumeToImmutable {
+            immutable_packet_name,
+            mutable_packet_name,
+        }.tokens();
         let minimum_packet_size = MinimumPacketSize(self, &bits_length_funcs).tokens();
         let packet_size = PacketSize(self, &struct_length_funcs).tokens();
         let populate = Populate {
@@ -209,7 +215,9 @@ If the provided buffer is less than the minimum required packet size, this will 
             pub fn new<'p>(packet: &'p #mut_ [u8]) -> Option<#packet_name<'p>> {
                 if packet.len() >= #packet_name::minimum_packet_size() {
                     use ::pnet_macros_support::packet:: #packet_data;
-                    Some(#packet_name { packet: #packet_data::Borrowed(packet) })
+                    Some(#packet_name {
+                        packet: #packet_data::Borrowed(packet),
+                    })
                 } else {
                     None
                 }
@@ -241,7 +249,9 @@ and the underlying buffer will be dropped when the {0} is.",
             pub fn owned(packet: Vec<u8>) -> Option<#packet_name<'static>> {
                 if packet.len() >= #packet_name::minimum_packet_size() {
                     use ::pnet_macros_support::packet::#packet_data;
-                    Some(#packet_name { packet: #packet_data::Owned(packet) })
+                    Some(#packet_name {
+                        packet: #packet_data::Owned(packet),
+                    })
                 } else {
                     None
                 }
@@ -250,12 +260,15 @@ and the underlying buffer will be dropped when the {0} is.",
     }
 }
 
-struct ToImmutable<'a>(&'a PacketGenerator<'a>);
+struct ToImmutable<'a> {
+    immutable_packet_name: &'a syn::Ident,
+    mutable_packet_name: &'a syn::Ident,
+}
 
 impl<'a> Generator for ToImmutable<'a> {
     fn tokens(&self) -> TokenStream {
-        let immutable_packet_name = self.0.immutable_packet_name();
-        let mutable_packet_name = self.0.mutable_packet_name();
+        let immutable_packet_name = self.immutable_packet_name;
+        let mutable_packet_name = self.mutable_packet_name;
 
         let comment = format!(
             "Maps from a {} to a {}",
@@ -267,18 +280,23 @@ impl<'a> Generator for ToImmutable<'a> {
             #[inline]
             pub fn to_immutable<'p>(&'p self) -> #immutable_packet_name<'p> {
                 use ::pnet_macros_support::packet::PacketData;
-                #immutable_packet_name { packet: PacketData::Borrowed(self.packet.as_slice()) }
+                #immutable_packet_name {
+                    packet: PacketData::Borrowed(self.packet.as_slice()),
+                }
             }
         }
     }
 }
 
-struct ConsumeToImmutable<'a>(&'a PacketGenerator<'a>);
+struct ConsumeToImmutable<'a> {
+    immutable_packet_name: &'a syn::Ident,
+    mutable_packet_name: &'a syn::Ident,
+}
 
 impl<'a> Generator for ConsumeToImmutable<'a> {
     fn tokens(&self) -> TokenStream {
-        let immutable_packet_name = self.0.immutable_packet_name();
-        let mutable_packet_name = self.0.mutable_packet_name();
+        let immutable_packet_name = self.immutable_packet_name;
+        let mutable_packet_name = self.mutable_packet_name;
 
         let comment = format!(
             "Maps from a {} to a {} while consuming the source",
@@ -289,7 +307,9 @@ impl<'a> Generator for ConsumeToImmutable<'a> {
             #[doc = #comment]
             #[inline]
             pub fn consume_to_immutable(self) -> #immutable_packet_name<'a> {
-                #immutable_packet_name { packet: self.packet.to_immutable() }
+                #immutable_packet_name {
+                    packet: self.packet.to_immutable(),
+                }
             }
         }
     }
@@ -1140,7 +1160,9 @@ mod tests {
                 pub fn new<'p>(packet: &'p [u8]) -> Option<FooPacket<'p>> {
                     if packet.len() >= FooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::PacketData;
-                        Some(FooPacket { packet: PacketData::Borrowed(packet) })
+                        Some(FooPacket {
+                            packet: PacketData::Borrowed(packet),
+                        })
                     } else {
                         None
                     }
@@ -1161,7 +1183,9 @@ mod tests {
                 pub fn new<'p>(packet: &'p mut [u8]) -> Option<MutableFooPacket<'p>> {
                     if packet.len() >= MutableFooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::MutPacketData;
-                        Some(MutableFooPacket { packet: MutPacketData::Borrowed(packet) })
+                        Some(MutableFooPacket {
+                            packet: MutPacketData::Borrowed(packet),
+                        })
                     } else {
                         None
                     }
@@ -1183,9 +1207,52 @@ mod tests {
                 pub fn owned(packet: Vec<u8>) -> Option<FooPacket<'static>> {
                     if packet.len() >= FooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::PacketData;
-                        Some(FooPacket { packet: PacketData::Owned(packet) })
+                        Some(FooPacket {
+                            packet: PacketData::Owned(packet),
+                        })
                     } else {
                         None
+                    }
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_to_immutable() {
+        assert_eq!(
+            ToImmutable {
+                immutable_packet_name: &ident!("FooPacket"),
+                mutable_packet_name: &ident!("MutableFooPacket"),
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[doc = "Maps from a MutableFooPacket to a FooPacket"]
+                #[inline]
+                pub fn to_immutable<'p>(&'p self) -> FooPacket<'p> {
+                    use ::pnet_macros_support::packet::PacketData;
+                    FooPacket {
+                        packet: PacketData::Borrowed(self.packet.as_slice()),
+                    }
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_consume_to_immutable() {
+        assert_eq!(
+            ConsumeToImmutable {
+                immutable_packet_name: &ident!("FooPacket"),
+                mutable_packet_name: &ident!("MutableFooPacket"),
+            }.tokens()
+                .to_string(),
+            quote!{
+                #[doc = "Maps from a MutableFooPacket to a FooPacket while consuming the source"]
+                #[inline]
+                pub fn consume_to_immutable(self) -> FooPacket<'a> {
+                    FooPacket {
+                        packet: self.packet.to_immutable(),
                     }
                 }
             }.to_string()
@@ -1423,7 +1490,7 @@ mod tests {
                     if packet.len() >= FooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::PacketData;
                         Some(FooPacket {
-                            packet: PacketData::Borrowed(packet)
+                            packet: PacketData::Borrowed(packet),
                         })
                     } else {
                         None
@@ -1434,7 +1501,7 @@ mod tests {
                     if packet.len() >= FooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::PacketData;
                         Some(FooPacket {
-                            packet: PacketData::Owned(packet)
+                            packet: PacketData::Owned(packet),
                         })
                     } else {
                         None
@@ -1445,14 +1512,14 @@ mod tests {
                 pub fn to_immutable<'p>(&'p self) -> FooPacket<'p> {
                     use ::pnet_macros_support::packet::PacketData;
                     FooPacket {
-                        packet: PacketData::Borrowed(self.packet.as_slice())
+                        packet: PacketData::Borrowed(self.packet.as_slice()),
                     }
                 }
                 #[doc = "Maps from a MutableFooPacket to a FooPacket while consuming the source"]
                 #[inline]
                 pub fn consume_to_immutable(self) -> FooPacket<'a> {
                     FooPacket {
-                        packet: self.packet.to_immutable()
+                        packet: self.packet.to_immutable(),
                     }
                 }
                 #[doc = r" The minimum size (in bytes) a packet of this type can be. It's based on the total size"]
@@ -1598,7 +1665,7 @@ mod tests {
                     if packet.len() >= MutableFooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::MutPacketData;
                         Some(MutableFooPacket {
-                            packet: MutPacketData::Borrowed(packet)
+                            packet: MutPacketData::Borrowed(packet),
                         })
                     } else {
                         None
@@ -1609,7 +1676,7 @@ mod tests {
                     if packet.len() >= MutableFooPacket::minimum_packet_size() {
                         use ::pnet_macros_support::packet::MutPacketData;
                         Some(MutableFooPacket {
-                            packet: MutPacketData::Owned(packet)
+                            packet: MutPacketData::Owned(packet),
                         })
                     } else {
                         None
@@ -1620,14 +1687,14 @@ mod tests {
                 pub fn to_immutable<'p>(&'p self) -> FooPacket<'p> {
                     use ::pnet_macros_support::packet::PacketData;
                     FooPacket {
-                        packet: PacketData::Borrowed(self.packet.as_slice())
+                        packet: PacketData::Borrowed(self.packet.as_slice()),
                     }
                 }
                 #[doc = "Maps from a MutableFooPacket to a FooPacket while consuming the source"]
                 #[inline]
                 pub fn consume_to_immutable(self) -> FooPacket<'a> {
                     FooPacket {
-                        packet: self.packet.to_immutable()
+                        packet: self.packet.to_immutable(),
                     }
                 }
                 #[doc = r" The minimum size (in bytes) a packet of this type can be. It's based on the total size"]
