@@ -431,27 +431,13 @@ struct ImplPacketTrait<'a> {
 
 impl<'a> Generator for ImplPacketTrait<'a> {
     fn tokens(&self) -> TokenStream {
-        let packet_trait = ident!(if self.mutable {
-            "MutablePacket"
-        } else {
-            "Packet"
-        });
+        let packet_trait = ident!("Packet");
+        let mutable_packet_trait = ident!("MutablePacket");
         let packet_name = self.packet_name;
-        let packet_method = if self.mutable {
-            ident!("packet_mut")
-        } else {
-            ident!("packet")
-        };
-        let payload_method = if self.mutable {
-            ident!("payload_mut")
-        } else {
-            ident!("payload")
-        };
-        let mut_ = if self.mutable {
-            Some(ident!("mut"))
-        } else {
-            None
-        };
+        let packet_method = ident!("packet");
+        let packet_mut_method = ident!("packet_mut");
+        let payload_method = ident!("payload");
+        let payload_mut_method = ident!("payload_mut");
 
         let (start_offset, end_offset) = self.payload_bounds.as_ref().either(
             |Range { start, end }| {
@@ -467,23 +453,50 @@ impl<'a> Generator for ImplPacketTrait<'a> {
             },
         );
 
-        quote! {
+        let impl_packet_trait = quote! {
             impl<'a> ::pnet_macros_support::packet:: #packet_trait for #packet_name<'a> {
                 #[inline]
-                fn #packet_method<'p>(&'p #mut_ self) -> &'p #mut_ [u8] { & #mut_ self.packet[..] }
+                fn #packet_method<'p>(&'p self) -> &'p [u8] { &self.packet[..] }
 
                 #[inline]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
-                fn #payload_method<'p>(&'p #mut_ self) -> &'p #mut_ [u8] {
+                fn #payload_method<'p>(&'p self) -> &'p [u8] {
                     let start = #start_offset;
 
                     if self.packet.len() <= start {
-                        & #mut_ []
+                        &[]
                     } else {
-                        & #mut_ self.packet[start..#end_offset]
+                        &self.packet[start..#end_offset]
                     }
                 }
             }
+        };
+
+        let impl_mutable_packet_trait = if self.mutable {
+            Some(quote! {
+                impl<'a> ::pnet_macros_support::packet:: #mutable_packet_trait for #packet_name<'a> {
+                    #[inline]
+                    fn #packet_mut_method<'p>(&'p mut self) -> &'p mut [u8] { &mut self.packet[..] }
+
+                    #[inline]
+                    fn #payload_mut_method<'p>(&'p mut self) -> &'p mut [u8] {
+                        let start = #start_offset;
+
+                        if self.packet.len() <= start {
+                            &mut []
+                        } else {
+                            &mut self.packet[start..#end_offset]
+                        }
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
+        quote! {
+            #impl_packet_trait
+
+            #impl_mutable_packet_trait
         }
     }
 }
@@ -1558,7 +1571,6 @@ mod tests {
                         &self.packet[..]
                     }
                     #[inline]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     fn payload<'p>(&'p self) -> &'p [u8] {
                         let start = 0usize;
                         if self.packet.len() <= start {
@@ -1573,7 +1585,7 @@ mod tests {
 
         assert_eq!(
             ImplPacketTrait {
-                packet_name: &ident!("Foo"),
+                packet_name: &ident!("MutableFooPacket"),
                 mutable: true,
                 payload_bounds: Either::Left(
                     vec![Length::Bits(32)]
@@ -1582,13 +1594,28 @@ mod tests {
             }.tokens()
                 .to_string(),
             quote! {
-                impl<'a> ::pnet_macros_support::packet::MutablePacket for Foo<'a> {
+                impl<'a> ::pnet_macros_support::packet::Packet for MutableFooPacket<'a> {
+                    #[inline]
+                    fn packet<'p>(&'p self) -> &'p [u8] {
+                        &self.packet[..]
+                    }
+                    #[inline]
+                    fn payload<'p>(&'p self) -> &'p [u8] {
+                        let start = 4usize;
+                        if self.packet.len() <= start {
+                            &[]
+                        } else {
+                            &self.packet[start..4usize + (3 + 4)]
+                        }
+                    }
+                }
+
+                impl<'a> ::pnet_macros_support::packet::MutablePacket for MutableFooPacket<'a> {
                     #[inline]
                     fn packet_mut<'p>(&'p mut self) -> &'p mut [u8] {
                         &mut self.packet[..]
                     }
                     #[inline]
-                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                     fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
                         let start = 4usize;
                         if self.packet.len() <= start {
@@ -1890,7 +1917,6 @@ mod tests {
                     &self.packet[..]
                 }
                 #[inline]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn payload<'p>(&'p self) -> &'p [u8] {
                     let start = 13usize;
                     if self.packet.len() <= start {
@@ -2113,13 +2139,27 @@ mod tests {
                     )
                 }
             }
+            impl<'a> ::pnet_macros_support::packet::Packet for MutableFooPacket<'a> {
+                #[inline]
+                fn packet<'p>(&'p self) -> &'p [u8] {
+                    &self.packet[..]
+                }
+                #[inline]
+                fn payload<'p>(&'p self) -> &'p [u8] {
+                    let start = 13usize;
+                    if self.packet.len() <= start {
+                        &[]
+                    } else {
+                        &self.packet[start..]
+                    }
+                }
+            }
             impl<'a> ::pnet_macros_support::packet::MutablePacket for MutableFooPacket<'a> {
                 #[inline]
                 fn packet_mut<'p>(&'p mut self) -> &'p mut [u8] {
                     &mut self.packet[..]
                 }
                 #[inline]
-                #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
                 fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
                     let start = 13usize;
                     if self.packet.len() <= start {
