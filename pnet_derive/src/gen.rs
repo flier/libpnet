@@ -12,9 +12,12 @@ use types::{parse_primitive, Endianness, Length, ToBytesOffset};
 
 macro_rules! ident {
     ($name:expr) => {
-        ident!($name, ::proc_macro2::Span::call_site())
+        ident!(::proc_macro2::Span::call_site() => $name)
     };
-    ($name:expr, $span:expr) => {
+    ($fmt:expr, $($arg:tt)*) => {
+        ident!(::proc_macro2::Span::call_site() => ::std::fmt::format(format_args!($fmt, $($arg)*)).as_str())
+    };
+    ($span:expr => $name:expr) => {
         ::syn::Ident::new($name, $span)
     };
 }
@@ -46,14 +49,11 @@ impl<'a> PacketGenerator<'a> {
     }
 
     fn immutable_packet_name(&self) -> syn::Ident {
-        syn::Ident::new(&format!("{}Packet", self.base_name()), Span::call_site())
+        ident!("{}Packet", self.base_name())
     }
 
     fn mutable_packet_name(&self) -> syn::Ident {
-        syn::Ident::new(
-            &format!("Mutable{}Packet", self.base_name()),
-            Span::call_site(),
-        )
+        ident!("Mutable{}Packet", self.base_name())
     }
 
     fn packet_name(&self) -> syn::Ident {
@@ -162,6 +162,11 @@ impl<'a> Generator for PacketGenerator<'a> {
             mutable,
             payload_bounds: payload_bounds.expect("#[packet] must contain a payload field"),
         }.tokens();
+        let impl_from_packet_trait = ImplFromPacketTrait {
+            base_name,
+            packet_name,
+            fields,
+        }.tokens();
         let impl_packet_iterator = if self.mutable {
             None
         } else {
@@ -195,6 +200,8 @@ impl<'a> Generator for PacketGenerator<'a> {
             }
 
             #impl_packet_trait
+
+            #impl_from_packet_trait
 
             #impl_packet_iterator
         }
@@ -389,7 +396,7 @@ impl<'a> Generator for Populate<'a> {
 
         let set_fields = self.fields.iter().map(|field| {
             let field_name = &field.name();
-            let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+            let set_field = ident!("set_{}", field_name);
 
             if field.as_vec().is_some() {
                 quote! {
@@ -478,6 +485,48 @@ impl<'a> Generator for ImplPacketTrait<'a> {
     }
 }
 
+struct ImplFromPacketTrait<'a> {
+    base_name: &'a syn::Ident,
+    packet_name: &'a syn::Ident,
+    fields: &'a [Field],
+}
+
+impl<'a> Generator for ImplFromPacketTrait<'a> {
+    fn tokens(&self) -> TokenStream {
+        let base_name = self.base_name;
+        let packet_name = self.packet_name;
+        let get_fields = self.fields.iter().map(|field| {
+            let field_name = field.name();
+            let get_field = ident!("get_{}", field_name);
+
+            if field.is_payload() {
+                quote! {
+                    #field_name: self.payload().to_vec(),
+                }
+            } else {
+                quote! {
+                    #field_name : self.#get_field(),
+                }
+            }
+        });
+
+        quote! {
+            impl<'p> ::pnet_macros_support::packet::FromPacket for #packet_name<'p> {
+                type T = #base_name;
+
+                #[inline]
+                fn from_packet(&self) -> Self::T {
+                    use ::pnet_macros_support::packet::Packet;
+
+                    #base_name {
+                        #(#get_fields)*
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct ImplPacketIterator<'a> {
     base_name: &'a syn::Ident,
     packet_name: &'a syn::Ident,
@@ -487,7 +536,7 @@ impl<'a> Generator for ImplPacketIterator<'a> {
     fn tokens(&self) -> TokenStream {
         let base_name = self.base_name;
         let packet_name = self.packet_name;
-        let iter_name = ident!{ &format!("{}Iterable", base_name) };
+        let iter_name = ident!("{}Iterable", base_name);
         let comment = format!("Used to iterate over a slice of `{}`s", packet_name);
 
         quote! {
@@ -591,7 +640,7 @@ impl<'a> Generator for PrimitiveFieldAccessor<'a> {
 This field is always stored in {} endianness within the struct, but this accessor returns host order.",
             field_name, self.endianness.map_or("host", |e| e.name())
         );
-        let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+        let get_field = ident!("get_{}", field_name);
         let read_ops = read_operations(
             self.length_funcs,
             self.bits,
@@ -664,8 +713,7 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
                 "Get the raw &[u8] value of the {} field, without copying",
                 field_name
             );
-            let get_field_raw =
-                syn::Ident::new(&format!("get_{}_raw", field_name), Span::call_site());
+            let get_field_raw = ident!("get_{}_raw", field_name);
 
             quote_spanned! { self.span() =>
                 #[doc = #comment]
@@ -687,8 +735,7 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
                 "Get the raw &mut [u8] value of the {} field, without copying",
                 field_name
             );
-            let get_field_raw_mut =
-                syn::Ident::new(&format!("get_{}_raw_mut", field_name), Span::call_site());
+            let get_field_raw_mut = ident!("get_{}_raw_mut", field_name);
 
             Some(quote_spanned! { self.span() =>
                 #[doc = #comment]
@@ -732,7 +779,7 @@ impl<'a> Generator for PrimitiveVecFieldAccessor<'a> {
             "Get the value of the {} field (copies contents)",
             field_name
         );
-        let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+        let get_field = ident!("get_{}", field_name);
         let current_offset = self.length_funcs.bytes_offset();
         let item_ty = &self.item_ty;
 
@@ -793,7 +840,7 @@ impl<'a> Generator for CustomFieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
         let field_name = &self.ident;
         let field_ty = &self.ty;
-        let get_field = syn::Ident::new(&format!("get_{}", field_name), Span::call_site());
+        let get_field = ident!("get_{}", field_name);
 
         let ctor = if self.arg_types.is_empty() {
             let bytes_offset = self.length_funcs.bytes_offset();
@@ -914,7 +961,7 @@ impl<'a> Generator for PrimitiveFieldMutator<'a> {
 This field is always stored in {} endianness within the struct, but this accessor returns host order.",
                             field_name, self.endianness.map_or("host", |e| e.name())
                         );
-        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+        let set_field = ident!("set_{}", field_name);
         let write_ops = write_operations(
             self.length_funcs,
             self.bits,
@@ -958,7 +1005,7 @@ impl<'a> Generator for VecFieldMutator<'a> {
             "Set the value of the {} field (copies contents)",
             field_name
         );
-        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+        let set_field = ident!("set_{}", field_name);
         let item_ty = self.item_ty;
         let current_offset = self.length_funcs.bytes_offset();
         let packet = if let Some(packet_length) = self.packet_length {
@@ -1033,7 +1080,7 @@ impl<'a> Generator for CustomFieldMutator<'a> {
         let field_name = &self.ident;
         let field_ty = &self.ty;
         let comment = format!("Set the value of the {} field", field_name);
-        let set_field = syn::Ident::new(&format!("set_{}", field_name), Span::call_site());
+        let set_field = ident!("set_{}", field_name);
 
         let setter = if self.arg_types.is_empty() {
             let bytes_offset = self.length_funcs.bytes_offset();
@@ -1455,6 +1502,49 @@ mod tests {
     }
 
     #[test]
+    fn test_impl_from_packet_trait() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                foo: u8,
+                #[length = 8]
+                data: Vec<u8>,
+                #[payload]
+                payload: Vec<u8>,
+            }
+        };
+        let fields = fields
+            .named
+            .into_iter()
+            .map(Field::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            ImplFromPacketTrait {
+                base_name: &ident!("Foo"),
+                packet_name: &ident!("FooPacket"),
+                fields: &fields,
+            }.tokens()
+                .to_string(),
+            quote! {
+                impl<'p> ::pnet_macros_support::packet::FromPacket for FooPacket<'p> {
+                    type T = Foo;
+
+                    #[inline]
+                    fn from_packet(&self) -> Self::T {
+                        use ::pnet_macros_support::packet::Packet;
+                        Foo {
+                            foo: self.get_foo(),
+                            data: self.get_data(),
+                            payload: self.payload().to_vec(),
+                        }
+                    }
+                }
+            }.to_string()
+        );
+    }
+
+    #[test]
     fn test_impl_packet_iterator() {
         assert_eq!(
             ImplPacketIterator {
@@ -1689,6 +1779,21 @@ mod tests {
                     }
                 }
             }
+            impl<'p> ::pnet_macros_support::packet::FromPacket for FooPacket<'p> {
+                type T = Foo;
+
+                #[inline]
+                fn from_packet(&self) -> Self::T {
+                    use ::pnet_macros_support::packet::Packet;
+                    Foo {
+                        flags: self.get_flags(),
+                        length: self.get_length(),
+                        hardware_type: self.get_hardware_type(),
+                        sender_hw_addr: self.get_sender_hw_addr(),
+                        body: self.payload().to_vec(),
+                    }
+                }
+            }
             #[doc = "Used to iterate over a slice of `FooPacket`s"]
             pub struct FooIterable<'a> {
                 buf: &'a [u8],
@@ -1879,6 +1984,21 @@ mod tests {
                         &mut []
                     } else {
                         &mut self.packet[start..]
+                    }
+                }
+            }
+            impl<'p> ::pnet_macros_support::packet::FromPacket for MutableFooPacket<'p> {
+                type T = Foo;
+
+                #[inline]
+                fn from_packet(&self) -> Self::T {
+                    use ::pnet_macros_support::packet::Packet;
+                    Foo {
+                        flags: self.get_flags(),
+                        length: self.get_length(),
+                        hardware_type: self.get_hardware_type(),
+                        sender_hw_addr: self.get_sender_hw_addr(),
+                        body: self.payload().to_vec(),
                     }
                 }
             }
