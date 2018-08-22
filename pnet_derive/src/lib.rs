@@ -1,5 +1,5 @@
 #![crate_type = "proc-macro"]
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 #[macro_use]
 extern crate failure;
