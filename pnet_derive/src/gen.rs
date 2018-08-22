@@ -79,7 +79,8 @@ impl<'a> PacketGenerator<'a> {
 
 impl<'a> Generator for PacketGenerator<'a> {
     fn tokens(&self) -> TokenStream {
-        let packet_name = self.packet_name();
+        let packet_name = &self.packet_name();
+        let mutable = self.mutable;
         let mut payload_bounds = None;
 
         let (accessors, _) = self.packet.fields.iter().fold(
@@ -138,7 +139,8 @@ impl<'a> Generator for PacketGenerator<'a> {
         let packet_size = PacketSize(self, &struct_length_funcs).tokens();
         let populate = Populate(self).tokens();
         let impl_packet_trait = ImplPacketTrait {
-            generator: self,
+            packet_name,
+            mutable,
             payload_bounds: payload_bounds.expect("#[packet] must contain a payload field"),
         }.tokens();
 
@@ -352,16 +354,9 @@ impl<'a> Generator for Populate<'a> {
 }
 
 struct ImplPacketTrait<'a> {
-    generator: &'a PacketGenerator<'a>,
+    packet_name: &'a syn::Ident,
+    mutable: bool,
     payload_bounds: Either<Range<Vec<Length>>, RangeFrom<Vec<Length>>>,
-}
-
-impl<'a> Deref for ImplPacketTrait<'a> {
-    type Target = PacketGenerator<'a>;
-
-    fn deref(&self) -> &Self::Target {
-        self.generator
-    }
 }
 
 impl<'a> Generator for ImplPacketTrait<'a> {
@@ -371,7 +366,7 @@ impl<'a> Generator for ImplPacketTrait<'a> {
         } else {
             "Packet"
         });
-        let packet_name = self.packet_name();
+        let packet_name = self.packet_name;
         let packet_method = if self.mutable {
             ident!("packet_mut")
         } else {
@@ -413,9 +408,10 @@ impl<'a> Generator for ImplPacketTrait<'a> {
                     let start = #start_offset;
 
                     if self.packet.len() <= start {
-                        return & #mut_ [];
+                        & #mut_ []
+                    } else {
+                        & #mut_ self.packet[start..#end_offset]
                     }
-                    & #mut_ self.packet[start..#end_offset]
                 }
             }
         }
@@ -1099,6 +1095,75 @@ mod tests {
     use super::*;
     use packet;
 
+    macro_rules! ident {
+        ($name:expr) => {
+            ident!($name, ::proc_macro2::Span::call_site())
+        };
+        ($name:expr, $span:expr) => {
+            ::syn::Ident::new($name, $span)
+        };
+    }
+
+    #[test]
+    fn test_impl_packet_trait() {
+        assert_eq!(
+            ImplPacketTrait {
+                packet_name: &ident!("Foo"),
+                mutable: false,
+                payload_bounds: Either::Right(vec![]..),
+            }.tokens()
+                .to_string(),
+            quote! {
+                impl<'a> ::pnet_macros_support::packet::Packet for Foo<'a> {
+                    #[inline]
+                    fn packet<'p>(&'p self) -> &'p [u8] {
+                        &self.packet[..]
+                    }
+                    #[inline]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    fn payload<'p>(&'p self) -> &'p [u8] {
+                        let start = 0usize;
+                        if self.packet.len() <= start {
+                            &[]
+                        } else {
+                            &self.packet[start..]
+                        }
+                    }
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            ImplPacketTrait {
+                packet_name: &ident!("Foo"),
+                mutable: true,
+                payload_bounds: Either::Left(
+                    vec![Length::Bits(32)]
+                        ..vec![Length::Bits(32), Length::Expr(parse_quote! { 3 + 4 })],
+                ),
+            }.tokens()
+                .to_string(),
+            quote! {
+                impl<'a> ::pnet_macros_support::packet::MutablePacket for Foo<'a> {
+                    #[inline]
+                    fn packet_mut<'p>(&'p mut self) -> &'p mut [u8] {
+                        &mut self.packet[..]
+                    }
+                    #[inline]
+                    #[cfg_attr(feature = "clippy", allow(used_underscore_binding))]
+                    fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
+                        let start = 4usize;
+                        if self.packet.len() <= start {
+                            &mut []
+                        } else {
+                            &mut self.packet[start..4usize + (3 + 4)]
+                        }
+                    }
+                }
+            }.to_string()
+        );
+    }
+
     #[test]
     fn test_packet() {
         let input: syn::DeriveInput = parse_quote! {
@@ -1296,9 +1361,10 @@ mod tests {
                 fn payload<'p>(&'p self) -> &'p [u8] {
                     let start = 13usize;
                     if self.packet.len() <= start {
-                        return &[];
+                        &[]
+                    } else {
+                        &self.packet[start..]
                     }
-                    &self.packet[start..]
                 }
             }
             impl<'a> MutableFooPacket<'a> {
@@ -1470,9 +1536,10 @@ mod tests {
                 fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
                     let start = 13usize;
                     if self.packet.len() <= start {
-                        return &mut [];
+                        &mut []
+                    } else {
+                        &mut self.packet[start..]
                     }
-                    &mut self.packet[start..]
                 }
             }
         }.to_string();
