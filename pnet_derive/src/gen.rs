@@ -31,59 +31,29 @@ pub struct PacketGenerator<'a> {
     mutable: bool,
 }
 
-impl<'a> Deref for PacketGenerator<'a> {
-    type Target = Packet;
-
-    fn deref(&self) -> &Self::Target {
-        self.packet
-    }
-}
-
 impl<'a> PacketGenerator<'a> {
     pub fn new(packet: &'a Packet, mutable: bool) -> Self {
         PacketGenerator { packet, mutable }
-    }
-
-    fn base_name(&self) -> &syn::Ident {
-        &self.packet.ident
-    }
-
-    fn immutable_packet_name(&self) -> syn::Ident {
-        ident!("{}Packet", self.base_name())
-    }
-
-    fn mutable_packet_name(&self) -> syn::Ident {
-        ident!("Mutable{}Packet", self.base_name())
-    }
-
-    fn packet_name(&self) -> syn::Ident {
-        if self.mutable {
-            self.mutable_packet_name()
-        } else {
-            self.immutable_packet_name()
-        }
-    }
-
-    fn packet_data(&self) -> syn::Ident {
-        syn::Ident::new(
-            if self.mutable {
-                "MutPacketData"
-            } else {
-                "PacketData"
-            },
-            Span::call_site(),
-        )
     }
 }
 
 impl<'a> Generator for PacketGenerator<'a> {
     fn tokens(&self) -> TokenStream {
-        let base_name = &self.base_name();
-        let packet_name = &self.packet_name();
-        let packet_data = &self.packet_data();
-        let immutable_packet_name = &self.immutable_packet_name();
-        let mutable_packet_name = &self.mutable_packet_name();
         let mutable = self.mutable;
+        let base_name = &self.packet.ident;
+        let immutable_packet_name = &ident!("{}Packet", base_name);
+        let mutable_packet_name = &ident!("Mutable{}Packet", base_name);
+        let packet_name = if self.mutable {
+            mutable_packet_name
+        } else {
+            immutable_packet_name
+        };
+        let packet_data = &if self.mutable {
+            ident!("MutPacketData")
+        } else {
+            ident!("PacketData")
+        };
+
         let fields = &self.packet.fields;
         let mut payload_bounds = None;
 
