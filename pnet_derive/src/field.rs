@@ -8,24 +8,32 @@ use types::{parse_primitive, Endianness, Length, Result};
 pub struct Field {
     pub ident: syn::Ident,
     pub ty: syn::Type,
-    pub kind: Kind,
+    pub kind: FieldKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Kind {
+pub enum FieldKind {
     Primitive {
         bits: usize,
         endianness: Option<Endianness>,
     },
     Vec {
         item_ty: syn::Ident,
-        item_bits: usize,
-        endianness: Option<Endianness>,
+        item_kind: ItemKind,
         packet_length: Option<Length>,
     },
     Custom {
         construct_with: Vec<syn::Ident>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ItemKind {
+    Primitive {
+        bits: usize,
+        endianness: Option<Endianness>,
+    },
+    Custom,
 }
 
 impl Field {
@@ -120,29 +128,31 @@ impl Field {
                                     ..
                                 })) if segments.len() == 1 =>
                                 {
+                                    if !is_payload && packet_length.is_none() {
+                                        bail!("variable length field must have #[length] or #[length_fn] attribute")
+                                    }
+
                                     let segment = segments.last().unwrap();
                                     let item_ty = &segment.value().ident;
 
-                                    if let Some((item_bits, endianness)) = parse_primitive(item_ty)
-                                    {
-                                        if !is_payload && packet_length.is_none() {
-                                            bail!("variable length field must have #[length] or #[length_fn] attribute")
-                                        }
-                                        if item_ty == "Vec" {
-                                            bail!("variable length fields may not contain vectors")
-                                        }
-                                        if item_bits % 8 != 0 {
+                                    if let Some((bits, endianness)) = parse_primitive(item_ty) {
+                                        if bits % 8 != 0 {
                                             bail!("variable length fields must align to byte")
                                         }
 
-                                        Some(Kind::Vec {
+                                        Some(FieldKind::Vec {
                                             item_ty: item_ty.clone(),
-                                            item_bits,
-                                            endianness,
+                                            item_kind: ItemKind::Primitive { bits, endianness },
                                             packet_length,
                                         })
+                                    } else if item_ty == "Vec" {
+                                        bail!("variable length fields may not contain vectors")
                                     } else {
-                                        None
+                                        Some(FieldKind::Vec {
+                                            item_ty: item_ty.clone(),
+                                            item_kind: ItemKind::Custom,
+                                            packet_length,
+                                        })
                                     }
                                 }
                                 _ => None,
@@ -151,7 +161,7 @@ impl Field {
                         _ => None,
                     }
                 } else if let Some((bits, endianness)) = parse_primitive(&ty.ident) {
-                    Some(Kind::Primitive { bits, endianness })
+                    Some(FieldKind::Primitive { bits, endianness })
                 } else {
                     None
                 }
@@ -159,7 +169,7 @@ impl Field {
             _ => None,
         }.or_else(|| {
             if !construct_with.is_empty() || is_payload {
-                Some(Kind::Custom { construct_with })
+                Some(FieldKind::Custom { construct_with })
             } else {
                 None
             }
@@ -186,11 +196,11 @@ impl Field {
 
     pub fn bits(&self) -> Option<Length> {
         match self.kind {
-            Kind::Primitive { bits, .. } => Some(Length::Bits(bits)),
-            Kind::Vec {
+            FieldKind::Primitive { bits, .. } => Some(Length::Bits(bits)),
+            FieldKind::Vec {
                 ref packet_length, ..
             } => packet_length.clone(),
-            Kind::Custom { ref construct_with } => Some(Length::Bits(
+            FieldKind::Custom { ref construct_with } => Some(Length::Bits(
                 construct_with
                     .iter()
                     .flat_map(|ty| parse_primitive(ty).map(|(bits, _)| bits))
@@ -201,13 +211,13 @@ impl Field {
 
     pub fn len(&self) -> Option<Length> {
         match self.kind {
-            Kind::Primitive { bits, .. } => Some(Length::Bits(bits)),
-            Kind::Vec { .. } => {
+            FieldKind::Primitive { bits, .. } => Some(Length::Bits(bits)),
+            FieldKind::Vec { .. } => {
                 let field_name = self.name();
 
                 Some(Length::Expr(parse_quote!{ packet.#field_name.len() }))
             }
-            Kind::Custom { ref construct_with } => Some(Length::Bits(
+            FieldKind::Custom { ref construct_with } => Some(Length::Bits(
                 construct_with
                     .iter()
                     .flat_map(|ty| parse_primitive(ty).map(|(bits, _)| bits))
@@ -218,36 +228,35 @@ impl Field {
 
     pub fn as_primitive(&self) -> Option<(usize, Option<Endianness>)> {
         match self.kind {
-            Kind::Primitive { bits, endianness } => Some((bits, endianness)),
+            FieldKind::Primitive { bits, endianness } => Some((bits, endianness)),
             _ => None,
         }
     }
 
-    pub fn as_vec(&self) -> Option<(&syn::Ident, usize, Option<Endianness>, Option<&Length>)> {
+    pub fn as_vec(&self) -> Option<(&syn::Ident, &ItemKind, Option<&Length>)> {
         match self.kind {
-            Kind::Vec {
+            FieldKind::Vec {
                 ref item_ty,
-                item_bits,
-                endianness,
+                ref item_kind,
                 ref packet_length,
-            } => Some((item_ty, item_bits, endianness, packet_length.as_ref())),
+            } => Some((item_ty, item_kind, packet_length.as_ref())),
             _ => None,
         }
     }
 
     pub fn as_custom(&self) -> Option<&[syn::Ident]> {
         match self.kind {
-            Kind::Custom { ref construct_with } => Some(construct_with),
+            FieldKind::Custom { ref construct_with } => Some(construct_with),
             _ => None,
         }
     }
 
     pub fn is_payload(&self) -> bool {
         match self.kind {
-            Kind::Vec {
+            FieldKind::Vec {
                 ref packet_length, ..
             } => packet_length.is_none(),
-            Kind::Custom {
+            FieldKind::Custom {
                 ref construct_with, ..
             } => construct_with.is_empty(),
             _ => false,
@@ -296,6 +305,7 @@ mod tests {
     fn test_vec_field_with_vec_item() {
         let fields: syn::FieldsNamed = parse_quote! {
             {
+                #[length = 8]
                 foo: Vec<Vec<u8>>,
             }
         };
@@ -304,7 +314,7 @@ mod tests {
             Field::parse(fields.named.into_iter().next().unwrap())
                 .unwrap_err()
                 .to_string(),
-            "non-primitive field types must specify #[construct_with]"
+            "variable length fields may not contain vectors"
         );
     }
 

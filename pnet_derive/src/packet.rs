@@ -43,7 +43,7 @@ impl Packet {
             if fields.iter().rev().skip(1).any(|field| {
                 field
                     .as_vec()
-                    .map(|(_, _, _, packet_length)| packet_length.is_none() && field.is_payload())
+                    .map(|(_, _, packet_length)| packet_length.is_none() && field.is_payload())
                     .unwrap_or_default()
             }) {
                 bail!("#[payload] must specify a #[length] or #[length_fn] attribute, unless it is the last field of a packet")

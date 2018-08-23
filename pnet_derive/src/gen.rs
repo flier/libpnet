@@ -7,7 +7,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn;
 
-use field::{Field, Kind};
+use field::{Field, FieldKind, ItemKind};
 use packet::Packet;
 use types::{parse_primitive, Endianness, Length, ToBytesOffset};
 
@@ -489,7 +489,7 @@ impl<'a> Generator for ImplPacketTrait<'a> {
                         let start = #start_offset;
 
                         if self.packet.len() <= start {
-                            &mut []
+                            &mut [][..]
                         } else {
                             &mut self.packet[start..#end_offset]
                         }
@@ -674,24 +674,22 @@ impl<'a> FieldAccessor<'a> {
 impl<'a> Generator for FieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
         match self.field.kind {
-            Kind::Primitive { bits, endianness } => PrimitiveFieldAccessor {
+            FieldKind::Primitive { bits, endianness } => PrimitiveFieldAccessor {
                 accessor: self,
                 bits,
                 endianness,
             }.tokens(),
-            Kind::Vec {
+            FieldKind::Vec {
                 ref item_ty,
-                item_bits,
-                endianness,
+                ref item_kind,
                 ref packet_length,
             } => VecFieldAccessor {
                 accessor: self,
                 item_ty,
-                item_bits,
-                endianness,
+                item_kind,
                 packet_length: packet_length.as_ref(),
             }.tokens(),
-            Kind::Custom { ref construct_with } => CustomFieldAccessor {
+            FieldKind::Custom { ref construct_with } => CustomFieldAccessor {
                 accessor: self,
                 arg_types: construct_with,
             }.tokens(),
@@ -742,8 +740,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 struct VecFieldAccessor<'a> {
     accessor: &'a FieldAccessor<'a>,
     item_ty: &'a syn::Ident,
-    item_bits: usize,
-    endianness: Option<Endianness>,
+    item_kind: &'a ItemKind,
     packet_length: Option<&'a Length>,
 }
 
@@ -761,12 +758,19 @@ impl<'a> Generator for VecFieldAccessor<'a> {
             .packet_length
             .map(|_| RawVecFieldAccessor(self).tokens());
 
-        let vec_primitive_accessor = PrimitiveVecFieldAccessor(self).tokens();
+        let field_accessor = match self.item_kind {
+            &ItemKind::Primitive { bits, endianness } => PrimitiveVecFieldAccessor {
+                accessor: self,
+                item_bits: bits,
+                endianness,
+            }.tokens(),
+            ItemKind::Custom => CustomVecFieldAccessor { accessor: self }.tokens(),
+        };
 
         quote_spanned! { self.span() =>
             #raw_accessors
 
-            #vec_primitive_accessor
+            #field_accessor
         }
     }
 }
@@ -802,7 +806,11 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
                     let packet_length = #packet_length;
                     let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                    &self.packet[off..end]
+                    if off < end {
+                        &self.packet[off..end]
+                    } else {
+                        &[][..]
+                    }
                 }
             }
         };
@@ -822,7 +830,11 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
                     let packet_length = #packet_length;
                     let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                    &mut self.packet[off..end]
+                    if off < end {
+                        &mut self.packet[off..end]
+                    } else {
+                        &mut [][..]
+                    }
                 }
             })
         } else {
@@ -837,13 +849,17 @@ impl<'a> Generator for RawVecFieldAccessor<'a> {
     }
 }
 
-struct PrimitiveVecFieldAccessor<'a>(&'a VecFieldAccessor<'a>);
+struct PrimitiveVecFieldAccessor<'a> {
+    accessor: &'a VecFieldAccessor<'a>,
+    item_bits: usize,
+    endianness: Option<Endianness>,
+}
 
 impl<'a> Deref for PrimitiveVecFieldAccessor<'a> {
     type Target = VecFieldAccessor<'a>;
 
     fn deref(&self) -> &Self::Target {
-        self.0
+        self.accessor
     }
 }
 
@@ -858,27 +874,34 @@ impl<'a> Generator for PrimitiveVecFieldAccessor<'a> {
         let current_offset = self.length_funcs.bytes_offset();
         let item_ty = &self.item_ty;
 
-        let packet = if let Some(packet_length) = self.packet_length {
+        let data = if let Some(packet_length) = self.packet_length {
             quote! {
                 let packet_length = #packet_length;
                 let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                let packet = &self.packet[off..end];
+                let data = if off < end {
+                    &self.packet[off..end]
+                } else {
+                    &[][..]
+                };
             }
         } else {
             quote! {
-                let packet = &self.packet[off..];
+                let data = if off < self.packet.len() {
+                    &self.packet[off..]
+                } else {
+                    &[][..]
+                };
             }
         };
         let read_ops = if self.item_ty == "u8" {
             quote! {
-                packet.to_vec()
+                data.to_vec()
             }
         } else {
-            let item_size = self.item_bits / 8;
             let read_ops = read_operations(0, self.item_bits, self.endianness, quote! { chunk });
 
             quote! {
-                packet.chunks(off).map(|chunk| { #read_ops }).collect()
+                data.chunks(off).map(|chunk| { #read_ops }).collect()
             }
         };
 
@@ -888,10 +911,81 @@ impl<'a> Generator for PrimitiveVecFieldAccessor<'a> {
             pub fn #get_field(&self) -> Vec<#item_ty> {
                 let off = #current_offset;
 
-                #packet
+                #data
 
                 #read_ops
             }
+        }
+    }
+}
+
+struct CustomVecFieldAccessor<'a> {
+    accessor: &'a VecFieldAccessor<'a>,
+}
+
+impl<'a> Deref for CustomVecFieldAccessor<'a> {
+    type Target = VecFieldAccessor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.accessor
+    }
+}
+
+impl<'a> Generator for CustomVecFieldAccessor<'a> {
+    fn tokens(&self) -> TokenStream {
+        let field_name = &self.ident;
+        let item_ty = self.item_ty;
+        let item_iter_ty = ident!("{}Iterable", item_ty);
+        let current_offset = self.length_funcs.bytes_offset();
+        let packet_length = self.packet_length;
+        let get_field = ident!("get_{}", field_name);
+        let get_field_iter = ident!("get_{}_iter", field_name);
+
+        let get_field = {
+            let comment = format!(
+                "Get the value of the {} field (copies contents)",
+                field_name
+            );
+
+            quote! {
+                #[doc = #comment]
+                #[inline]
+                pub fn #get_field(&self) -> Vec<#item_ty> {
+                    use ::pnet_macros_support::packet::FromPacket;
+
+                    self.#get_field_iter()
+                        .map(FromPacket::from_packet)
+                        .collect::<Vec<_>>()
+                }
+            }
+        };
+
+        let get_field_iter = {
+            let comment = format!("Get the value of the {} field as iterator", field_name);
+
+            quote! {
+                #[doc = #comment]
+                #[inline]
+                pub fn #get_field_iter(&self) -> #item_iter_ty {
+                    let off = #current_offset;
+                    let packet_length = #packet_length;
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    #item_iter_ty {
+                        buf: if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        },
+                    }
+                }
+            }
+        };
+
+        quote!{
+            #get_field
+
+            #get_field_iter
         }
     }
 }
@@ -985,24 +1079,22 @@ impl<'a> FieldMutator<'a> {
 impl<'a> Generator for FieldMutator<'a> {
     fn tokens(&self) -> TokenStream {
         match self.field.kind {
-            Kind::Primitive { bits, endianness } => PrimitiveFieldMutator {
+            FieldKind::Primitive { bits, endianness } => PrimitiveFieldMutator {
                 mutator: self,
                 bits,
                 endianness,
             }.tokens(),
-            Kind::Vec {
+            FieldKind::Vec {
                 ref item_ty,
-                item_bits,
-                endianness,
+                ref item_kind,
                 ref packet_length,
             } => VecFieldMutator {
                 mutator: self,
                 item_ty,
-                item_bits,
-                endianness,
+                item_kind,
                 packet_length: packet_length.as_ref(),
             }.tokens(),
-            Kind::Custom { ref construct_with } => CustomFieldMutator {
+            FieldKind::Custom { ref construct_with } => CustomFieldMutator {
                 mutator: self,
                 arg_types: construct_with,
             }.tokens(),
@@ -1054,8 +1146,7 @@ This field is always stored in {} endianness within the struct, but this accesso
 struct VecFieldMutator<'a> {
     mutator: &'a FieldMutator<'a>,
     item_ty: &'a syn::Ident,
-    item_bits: usize,
-    endianness: Option<Endianness>,
+    item_kind: &'a ItemKind,
     packet_length: Option<&'a Length>,
 }
 
@@ -1077,41 +1168,65 @@ impl<'a> Generator for VecFieldMutator<'a> {
         let set_field = ident!("set_{}", field_name);
         let item_ty = self.item_ty;
         let current_offset = self.length_funcs.bytes_offset();
-        let packet = if let Some(packet_length) = self.packet_length {
+        let data = if let Some(packet_length) = self.packet_length {
             quote! {
                 let packet_length = #packet_length;
                 let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                let packet = &mut self.packet[off..end];
+                let data = if off < end {
+                    &mut self.packet[off..end]
+                } else {
+                    &mut [][..]
+                };
             }
         } else {
             quote! {
-                let packet = &mut self.packet[off..];
+                let data = if off < self.packet.len() {
+                    &mut self.packet[off..]
+                } else {
+                    &mut [][..]
+                };
             }
         };
-        let write_ops = if self.item_ty == "u8" {
-            quote! {
-                packet.copy_from_slice(vals)
+
+        let write_ops = match self.item_kind {
+            ItemKind::Primitive { .. } if self.item_ty == "u8" => {
+                quote! {
+                    data.copy_from_slice(vals)
+                }
             }
-        } else {
-            let bytes_size = (self.item_bits + 7) / 8;
-            let write_ops = write_operations(
-                0,
-                self.item_bits,
-                self.endianness,
-                quote! { buf },
-                quote! { v },
-            );
+            &ItemKind::Primitive { bits, endianness } => {
+                let bytes_size = (bits + 7) / 8;
+                let write_ops = write_operations(0, bits, endianness, quote! { buf }, quote! { v });
 
-            quote!{
-                let buf = vals.iter().flat_map(|&v| {
-                    let mut buf = vec![0u8; #bytes_size];
+                quote!{
+                    let buf = vals.iter().flat_map(|&v| {
+                        let mut buf = vec![0u8; #bytes_size];
 
-                    #write_ops
+                        #write_ops
 
-                    buf.into_iter()
-                }).collect::<Vec<_>>();
+                        buf.into_iter()
+                    }).collect::<Vec<_>>();
 
-                packet.copy_from_slice(buf.as_slice())
+                    data.copy_from_slice(buf.as_slice())
+                }
+            }
+            ItemKind::Custom => {
+                let packet_length = self.packet_length.unwrap_or_else(|| &Length::Bits(0));
+                let mutable_packet_name = ident!("Mutable{}Packet", self.item_ty);
+
+                quote!{
+                    use pnet_macros_support::packet::PacketSize;
+                    let mut pos = 0;
+
+                    for val in vals.into_iter() {
+                        let mut packet = #mutable_packet_name::new(&mut data[pos..]).unwrap();
+                        packet.populate(val);
+                        pos += packet.packet_size();
+                        if pos >= data.len() {
+                            break;
+                        }
+                    }
+                }
             }
         };
 
@@ -1121,7 +1236,7 @@ impl<'a> Generator for VecFieldMutator<'a> {
             pub fn #set_field(&mut self, vals: &[#item_ty]) {
                 let off = #current_offset;
 
-                #packet
+                #data
 
                 #write_ops
             }
@@ -1627,7 +1742,7 @@ mod tests {
                     fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
                         let start = 4usize;
                         if self.packet.len() <= start {
-                            &mut []
+                            &mut [][..]
                         } else {
                             &mut self.packet[start..4usize + (3 + 4)]
                         }
@@ -1749,8 +1864,11 @@ mod tests {
                 #[construct_with(u8, u8, u8, u8, u8, u8)]
                 pub sender_hw_addr: MacAddr,
 
+                #[length_fn = "ipv4_options_length"]
+                pub options: Vec<Ipv4Option>,
+
                 #[payload]
-                body: Vec<u8>,
+                pub body: Vec<u8>,
             }
         };
 
@@ -1798,12 +1916,53 @@ mod tests {
                         self.packet[12usize]
                     )
                 }
+                #[doc = "Get the raw &[u8] value of the options field, without copying"]
+                #[inline]
+                pub fn get_options_raw(&self) -> &[u8] {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    if off < end {
+                        &self.packet[off..end]
+                    } else {
+                        &[][..]
+                    }
+                }
+                #[doc = "Get the value of the options field (copies contents)"]
+                #[inline]
+                pub fn get_options(&self) -> Vec<Ipv4Option> {
+                    use ::pnet_macros_support::packet::FromPacket;
+
+                    self.get_options_iter()
+                        .map(FromPacket::from_packet)
+                        .collect::<Vec<_>>()
+                }
+                #[doc = "Get the value of the options field as iterator"]
+                #[inline]
+                pub fn get_options_iter(&self) -> Ipv4OptionIterable {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    Ipv4OptionIterable {
+                        buf: if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        },
+                    }
+                }
                 #[doc = "Get the value of the body field (copies contents)"]
                 #[inline]
                 pub fn get_body(&self) -> Vec<u8> {
-                    let off = 13usize;
-                    let packet = &self.packet[off..];
-                    packet.to_vec()
+                    let off = 13usize + ipv4_options_length(&self.to_immutable());
+                    let data = if off < self.packet.len() {
+                        &self.packet[off..]
+                    } else {
+                        &[][..]
+                    };
+                    data.to_vec()
                 }
                 #[doc = "Set the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
@@ -1840,12 +1999,38 @@ mod tests {
                     self.packet[11usize] = vals.4usize;
                     self.packet[12usize] = vals.5usize;
                 }
+                #[doc = "Set the value of the options field (copies contents)"]
+                #[inline]
+                pub fn set_options(&mut self, vals: &[Ipv4Option]) {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                    let data = if off < end {
+                        &mut self.packet[off..end]
+                    } else {
+                        &mut [][..]
+                    };
+                    use pnet_macros_support::packet::PacketSize;
+                    let mut pos = 0;
+                    for val in vals.into_iter() {
+                        let mut packet = MutableIpv4OptionPacket::new(&mut data[pos..]).unwrap();
+                        packet.populate(val);
+                        pos += packet.packet_size();
+                        if pos >= data.len() {
+                            break;
+                        }
+                    }
+                }
                 #[doc = "Set the value of the body field (copies contents)"]
                 #[inline]
                 pub fn set_body(&mut self, vals: &[u8]) {
-                    let off = 13usize;
-                    let packet = &mut self.packet[off..];
-                    packet.copy_from_slice(vals)
+                    let off = 13usize + ipv4_options_length(&self.to_immutable());
+                    let data = if off < self.packet.len() {
+                        &mut self.packet[off..]
+                    } else {
+                        &mut [][..]
+                    };
+                    data.copy_from_slice(vals)
                 }
                 #[doc = "Constructs a new FooPacket.\nIf the provided buffer is less than the minimum required packet size, this will return None."]
                 #[inline]
@@ -1889,12 +2074,12 @@ mod tests {
                 #[doc = r" It's based on the total size of the fixed-size fields."]
                 #[inline]
                 pub fn minimum_packet_size() -> usize {
-                    13usize
+                    13usize + ipv4_options_length(&self.to_immutable())
                 }
                 #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
                 #[inline]
                 pub fn packet_size(packet: &Foo) -> usize {
-                    13usize + (packet.body.len())
+                    13usize + (packet.options.len()) + (packet.body.len())
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
@@ -1903,6 +2088,7 @@ mod tests {
                     self.set_length(packet.length);
                     self.set_hardware_type(packet.hardware_type);
                     self.set_sender_hw_addr(packet.sender_hw_addr);
+                    self.set_options(&packet.options);
                     self.set_body(&packet.body);
                 }
             }
@@ -1910,11 +2096,12 @@ mod tests {
                 fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                     write!(
                         fmt,
-                        "FooPacket {{ flags: {:?}, length: {:?}, hardware_type: {:?}, sender_hw_addr: {:?}, body: {:?}, }}",
+                        "FooPacket {{ flags: {:?}, length: {:?}, hardware_type: {:?}, sender_hw_addr: {:?}, options: {:?}, body: {:?}, }}",
                         self.get_flags(),
                         self.get_length(),
                         self.get_hardware_type(),
                         self.get_sender_hw_addr(),
+                        self.get_options(),
                         self.get_body(),
                     )
                 }
@@ -1926,7 +2113,7 @@ mod tests {
                 }
                 #[inline]
                 fn payload<'p>(&'p self) -> &'p [u8] {
-                    let start = 13usize;
+                    let start = 13usize + ipv4_options_length(&self.to_immutable());
                     if self.packet.len() <= start {
                         &[]
                     } else {
@@ -1936,7 +2123,7 @@ mod tests {
             }
             impl<'a> ::pnet_macros_support::packet::PacketSize for FooPacket<'a> {
                 fn packet_size(&self) -> usize {
-                    13usize
+                    13usize + ipv4_options_length(&self.to_immutable())
                 }
             }
             impl<'p> ::pnet_macros_support::packet::FromPacket for FooPacket<'p> {
@@ -1950,6 +2137,7 @@ mod tests {
                         length: self.get_length(),
                         hardware_type: self.get_hardware_type(),
                         sender_hw_addr: self.get_sender_hw_addr(),
+                        options: self.get_options(),
                         body: self.payload().to_vec(),
                     }
                 }
@@ -2009,12 +2197,65 @@ mod tests {
                         self.packet[12usize]
                     )
                 }
+                #[doc = "Get the raw &[u8] value of the options field, without copying"]
+                #[inline]
+                pub fn get_options_raw(&self) -> &[u8] {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    if off < end {
+                        &self.packet[off..end]
+                    } else {
+                        &[][..]
+                    }
+                }
+                #[doc = "Get the raw &mut [u8] value of the options field, without copying"]
+                #[inline]
+                pub fn get_options_raw_mut(&mut self) -> &mut [u8] {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                    if off < end {
+                        &mut self.packet[off..end]
+                    } else {
+                        &mut [][..]
+                    }
+                }
+                #[doc = "Get the value of the options field (copies contents)"]
+                #[inline]
+                pub fn get_options(&self) -> Vec<Ipv4Option> {
+                    use ::pnet_macros_support::packet::FromPacket;
+
+                    self.get_options_iter()
+                        .map(FromPacket::from_packet)
+                        .collect::<Vec<_>>()
+                }
+                #[doc = "Get the value of the options field as iterator"]
+                #[inline]
+                pub fn get_options_iter(&self) -> Ipv4OptionIterable {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    Ipv4OptionIterable {
+                        buf: if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        },
+                    }
+                }
                 #[doc = "Get the value of the body field (copies contents)"]
                 #[inline]
                 pub fn get_body(&self) -> Vec<u8> {
-                    let off = 13usize;
-                    let packet = &self.packet[off..];
-                    packet.to_vec()
+                    let off = 13usize + ipv4_options_length(&self.to_immutable());
+                    let data = if off < self.packet.len() {
+                        &self.packet[off..]
+                    } else {
+                        &[][..]
+                    };
+                    data.to_vec()
                 }
                 #[doc = "Set the flags field.\nThis field is always stored in big endianness within the struct, but this accessor returns host order."]
                 #[inline]
@@ -2051,12 +2292,38 @@ mod tests {
                     self.packet[11usize] = vals.4usize;
                     self.packet[12usize] = vals.5usize;
                 }
+                #[doc = "Set the value of the options field (copies contents)"]
+                #[inline]
+                pub fn set_options(&mut self, vals: &[Ipv4Option]) {
+                    let off = 13usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                    let data = if off < end {
+                        &mut self.packet[off..end]
+                    } else {
+                        &mut [][..]
+                    };
+                    use pnet_macros_support::packet::PacketSize;
+                    let mut pos = 0;
+                    for val in vals.into_iter() {
+                        let mut packet = MutableIpv4OptionPacket::new(&mut data[pos..]).unwrap();
+                        packet.populate(val);
+                        pos += packet.packet_size();
+                        if pos >= data.len() {
+                            break;
+                        }
+                    }
+                }
                 #[doc = "Set the value of the body field (copies contents)"]
                 #[inline]
                 pub fn set_body(&mut self, vals: &[u8]) {
-                    let off = 13usize;
-                    let packet = &mut self.packet[off..];
-                    packet.copy_from_slice(vals)
+                    let off = 13usize + ipv4_options_length(&self.to_immutable());
+                    let data = if off < self.packet.len() {
+                        &mut self.packet[off..]
+                    } else {
+                        &mut [][..]
+                    };
+                    data.copy_from_slice(vals)
                 }
                 #[doc = "Constructs a new MutableFooPacket.\nIf the provided buffer is less than the minimum required packet size, this will return None."]
                 #[inline]
@@ -2100,12 +2367,12 @@ mod tests {
                 #[doc = r" It's based on the total size of the fixed-size fields."]
                 #[inline]
                 pub fn minimum_packet_size() -> usize {
-                    13usize
+                    13usize + ipv4_options_length(&self.to_immutable())
                 }
                 #[doc = "The size (in bytes) of a Foo instance when converted into a byte-array"]
                 #[inline]
                 pub fn packet_size(packet: &Foo) -> usize {
-                    13usize + (packet.body.len())
+                    13usize + (packet.options.len()) + (packet.body.len())
                 }
                 #[doc = "Populates a MutableFooPacket using a Foo structure"]
                 #[inline]
@@ -2114,6 +2381,7 @@ mod tests {
                     self.set_length(packet.length);
                     self.set_hardware_type(packet.hardware_type);
                     self.set_sender_hw_addr(packet.sender_hw_addr);
+                    self.set_options(&packet.options);
                     self.set_body(&packet.body);
                 }
             }
@@ -2121,11 +2389,12 @@ mod tests {
                 fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                     write!(
                         fmt,
-                        "MutableFooPacket {{ flags: {:?}, length: {:?}, hardware_type: {:?}, sender_hw_addr: {:?}, body: {:?}, }}",
+                        "MutableFooPacket {{ flags: {:?}, length: {:?}, hardware_type: {:?}, sender_hw_addr: {:?}, options: {:?}, body: {:?}, }}",
                         self.get_flags(),
                         self.get_length(),
                         self.get_hardware_type(),
                         self.get_sender_hw_addr(),
+                        self.get_options(),
                         self.get_body(),
                     )
                 }
@@ -2137,7 +2406,7 @@ mod tests {
                 }
                 #[inline]
                 fn payload<'p>(&'p self) -> &'p [u8] {
-                    let start = 13usize;
+                    let start = 13usize + ipv4_options_length(&self.to_immutable());
                     if self.packet.len() <= start {
                         &[]
                     } else {
@@ -2152,9 +2421,9 @@ mod tests {
                 }
                 #[inline]
                 fn payload_mut<'p>(&'p mut self) -> &'p mut [u8] {
-                    let start = 13usize;
+                    let start = 13usize + ipv4_options_length(&self.to_immutable());
                     if self.packet.len() <= start {
-                        &mut []
+                        &mut [][..]
                     } else {
                         &mut self.packet[start..]
                     }
@@ -2162,7 +2431,7 @@ mod tests {
             }
             impl<'a> ::pnet_macros_support::packet::PacketSize for MutableFooPacket<'a> {
                 fn packet_size(&self) -> usize {
-                    13usize
+                    13usize + ipv4_options_length(&self.to_immutable())
                 }
             }
             impl<'p> ::pnet_macros_support::packet::FromPacket for MutableFooPacket<'p> {
@@ -2176,6 +2445,7 @@ mod tests {
                         length: self.get_length(),
                         hardware_type: self.get_hardware_type(),
                         sender_hw_addr: self.get_sender_hw_addr(),
+                        options: self.get_options(),
                         body: self.payload().to_vec(),
                     }
                 }
@@ -2330,7 +2600,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .map(|(_, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "8usize"
             );
@@ -2347,7 +2617,11 @@ mod tests {
                         let packet_length = 8usize;
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &self.packet[off..end]
+                        if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        }
                     }
 
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
@@ -2357,7 +2631,11 @@ mod tests {
                         let packet_length = 8usize;
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &mut self.packet[off..end]
+                        if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        }
                     }
 
                     #[doc = "Get the value of the body field (copies contents)"]
@@ -2366,9 +2644,13 @@ mod tests {
                         let off = 2usize;
                         let packet_length = 8usize;
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                        let packet = &self.packet[off..end];
+                        let data = if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        };
 
-                        packet.to_vec()
+                        data.to_vec()
                     }
                 }.to_string()
             );
@@ -2382,9 +2664,13 @@ mod tests {
                        let off = 2usize;
                        let packet_length = 8usize;
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                       let packet = &mut self.packet[off..end];
+                       let data = if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        };
 
-                       packet.copy_from_slice(vals)
+                       data.copy_from_slice(vals)
                    }
                 }.to_string()
             );
@@ -2396,7 +2682,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .map(|(_, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "( 8 )"
             );
@@ -2413,7 +2699,11 @@ mod tests {
                         let packet_length = ( 8 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &self.packet[off..end]
+                        if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        }
                     }
 
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
@@ -2423,7 +2713,11 @@ mod tests {
                         let packet_length = ( 8 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &mut self.packet[off..end]
+                        if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        }
                     }
 
                     #[doc = "Get the value of the body field (copies contents)"]
@@ -2432,9 +2726,13 @@ mod tests {
                         let off = 2usize;
                         let packet_length = ( 8 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                        let packet = &self.packet[off..end];
+                        let data = if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        };
 
-                        packet.to_vec()
+                        data.to_vec()
                     }
                 }.to_string()
             );
@@ -2448,9 +2746,13 @@ mod tests {
                        let off = 2usize;
                        let packet_length = ( 8 );
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                       let packet = &mut self.packet[off..end];
+                       let data = if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        };
 
-                       packet.copy_from_slice(vals)
+                       data.copy_from_slice(vals)
                    }
                 }.to_string()
             );
@@ -2462,7 +2764,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .map(|(_, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "( 4 + 4 )"
             );
@@ -2479,7 +2781,11 @@ mod tests {
                         let packet_length = ( 4 + 4 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &self.packet[off..end]
+                        if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        }
                     }
 
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
@@ -2489,7 +2795,11 @@ mod tests {
                         let packet_length = ( 4 + 4 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &mut self.packet[off..end]
+                        if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        }
                     }
 
                     #[doc = "Get the value of the body field (copies contents)"]
@@ -2498,9 +2808,13 @@ mod tests {
                         let off = 2usize;
                         let packet_length = ( 4 + 4 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                        let packet = &self.packet[off..end];
+                        let data = if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        };
 
-                        packet.to_vec()
+                        data.to_vec()
                     }
                 }.to_string()
             );
@@ -2514,9 +2828,13 @@ mod tests {
                        let off = 2usize;
                        let packet_length = ( 4 + 4 );
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                       let packet = &mut self.packet[off..end];
+                       let data = if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        };
 
-                       packet.copy_from_slice(vals)
+                       data.copy_from_slice(vals)
                    }
                 }.to_string()
             );
@@ -2528,7 +2846,7 @@ mod tests {
             assert_eq!(
                 field
                     .as_vec()
-                    .map(|(_, _, _, packet_length)| packet_length.into_token_stream().to_string())
+                    .map(|(_, _, packet_length)| packet_length.into_token_stream().to_string())
                     .unwrap(),
                 "( self . pkt_len / 2 )"
             );
@@ -2545,7 +2863,11 @@ mod tests {
                         let packet_length = ( self . pkt_len / 2 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &self.packet[off..end]
+                        if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        }
                     }
 
                     #[doc = "Get the raw &mut [u8] value of the body field, without copying"]
@@ -2555,7 +2877,11 @@ mod tests {
                         let packet_length = ( self . pkt_len / 2 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
 
-                        &mut self.packet[off..end]
+                        if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        }
                     }
 
                     #[doc = "Get the value of the body field (copies contents)"]
@@ -2564,9 +2890,13 @@ mod tests {
                         let off = 2usize;
                         let packet_length = ( self . pkt_len / 2 );
                         let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                        let packet = &self.packet[off..end];
+                        let data = if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        };
 
-                        packet.to_vec()
+                        data.to_vec()
                     }
                 }.to_string()
             );
@@ -2580,9 +2910,13 @@ mod tests {
                        let off = 2usize;
                        let packet_length = ( self . pkt_len / 2 );
                        let end = ::std::cmp::min(off + packet_length, self.packet.len());
-                       let packet = &mut self.packet[off..end];
+                       let data = if off < end {
+                            &mut self.packet[off..end]
+                        } else {
+                            &mut [][..]
+                        };
 
-                       packet.copy_from_slice(vals)
+                       data.copy_from_slice(vals)
                    }
                 }.to_string()
             );
@@ -2603,7 +2937,14 @@ mod tests {
         assert_eq!(field.name(), "body");
         assert_eq!(
             field.as_vec(),
-            Some((&ident!("u8"), 8, Some(Endianness::Big), None))
+            Some((
+                &ident!("u8"),
+                &ItemKind::Primitive {
+                    bits: 8,
+                    endianness: Some(Endianness::Big),
+                },
+                None
+            ))
         );
 
         let length_funcs = &[Length::Bits(16)][..];
@@ -2617,8 +2958,12 @@ mod tests {
                 #[inline]
                 pub fn get_body(&self) -> Vec <u8> {
                     let off = 2usize;
-                    let packet = &self.packet[off..];
-                    packet.to_vec()
+                    let data = if off < self.packet.len() {
+                        &self.packet[off..]
+                    } else {
+                        &[][..]
+                    };
+                    data.to_vec()
                 }
             }.to_string()
         );
@@ -2630,8 +2975,12 @@ mod tests {
                #[inline]
                pub fn set_body(&mut self, vals: &[u8]) {
                    let off = 2usize;
-                   let packet = &mut self.packet[off..];
-                   packet.copy_from_slice(vals)
+                   let data = if off < self.packet.len() {
+                        &mut self.packet[off..]
+                    } else {
+                        &mut [][..]
+                    };
+                   data.copy_from_slice(vals)
                }
             }.to_string()
         );
@@ -2651,7 +3000,14 @@ mod tests {
         assert_eq!(field.name(), "body");
         assert_eq!(
             field.as_vec(),
-            Some((&ident!("u16"), 16, Some(Endianness::Big), None))
+            Some((
+                &ident!("u16"),
+                &ItemKind::Primitive {
+                    bits: 16,
+                    endianness: Some(Endianness::Big),
+                },
+                None
+            ))
         );
 
         let length_funcs = &[Length::Bits(16)][..];
@@ -2665,8 +3021,12 @@ mod tests {
                 #[inline]
                 pub fn get_body(&self) -> Vec <u16> {
                     let off = 2usize;
-                    let packet = &self.packet[off..];
-                    packet.chunks(off).map(|chunk| {
+                    let data = if off < self.packet.len() {
+                        &self.packet[off..]
+                    } else {
+                        &[][..]
+                    };
+                    data.chunks(off).map(|chunk| {
                         <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&chunk[0usize..])
                     }).collect()
                 }
@@ -2680,15 +3040,109 @@ mod tests {
                #[inline]
                pub fn set_body(&mut self, vals: &[u16]) {
                    let off = 2usize;
-                   let packet = &mut self.packet[off..];
+                   let data = if off < self.packet.len() {
+                       &mut self.packet[off..]
+                   } else {
+                       &mut [][..]
+                   };
                    let buf = vals.iter().flat_map(|&v| {
                        let mut buf = vec![0u8; 2usize];
                        <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut buf[0usize..], v);
                        buf.into_iter()
                     }).collect::<Vec<_>>();
 
-                    packet.copy_from_slice(buf.as_slice())
+                    data.copy_from_slice(buf.as_slice())
                }
+            }.to_string()
+        );
+    }
+
+    #[test]
+    fn test_custom_vec_field() {
+        let fields: syn::FieldsNamed = parse_quote! {
+            {
+                #[length_fn = "ipv4_options_length"]
+                pub options: Vec<Ipv4Option>,
+            }
+        };
+
+        let mut iter = fields.named.into_iter();
+        let options = Field::parse(iter.next().unwrap()).unwrap();
+
+        let length_funcs = &[Length::Bits(16)][..];
+
+        assert_eq!(
+            FieldAccessor::new(&options, false, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc = "Get the raw &[u8] value of the options field, without copying"]
+                #[inline]
+                pub fn get_options_raw(&self) -> &[u8] {
+                    let off = 2usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    if off < end {
+                        &self.packet[off..end]
+                    } else {
+                        &[][..]
+                    }
+                }
+                #[doc = "Get the value of the options field (copies contents)"]
+                #[inline]
+                pub fn get_options(&self) -> Vec<Ipv4Option> {
+                    use ::pnet_macros_support::packet::FromPacket;
+
+                    self.get_options_iter()
+                        .map(FromPacket::from_packet)
+                        .collect::<Vec<_>>()
+                }
+                #[doc = "Get the value of the options field as iterator"]
+                #[inline]
+                pub fn get_options_iter(&self) -> Ipv4OptionIterable {
+                    let off = 2usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+
+                    Ipv4OptionIterable {
+                        buf: if off < end {
+                            &self.packet[off..end]
+                        } else {
+                            &[][..]
+                        },
+                    }
+                }
+            }.to_string()
+        );
+
+        assert_eq!(
+            FieldMutator::new(&options, length_funcs)
+                .tokens()
+                .to_string(),
+            quote!{
+                #[doc = "Set the value of the options field (copies contents)"]
+                #[inline]
+                pub fn set_options(&mut self, vals: &[Ipv4Option]) {
+                    let off = 2usize;
+                    let packet_length = ipv4_options_length(&self.to_immutable());
+                    let end = ::std::cmp::min(off + packet_length, self.packet.len());
+                    let data = if off < end {
+                        &mut self.packet[off..end]
+                    } else {
+                        &mut [][..]
+                    };
+                    use pnet_macros_support::packet::PacketSize;
+                    let mut pos = 0;
+                    for val in vals.into_iter() {
+                        let mut packet = MutableIpv4OptionPacket::new(&mut data[pos..]).unwrap();
+                        packet.populate(val);
+                        pos += packet.packet_size();
+                        if pos >= data.len() {
+                            break;
+                        }
+                    }
+                }
             }.to_string()
         );
     }
