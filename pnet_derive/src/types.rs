@@ -3,6 +3,7 @@ use std::iter::once;
 use std::mem;
 use std::result::Result as StdResult;
 
+use either::Either;
 use failure::Error;
 use proc_macro2::TokenStream;
 use quote::{ToTokens, TokenStreamExt};
@@ -67,28 +68,86 @@ impl From<syn::Ident> for Length {
     }
 }
 
+pub trait ToBitsOffset {
+    fn bits_offset(&self) -> Either<usize, TokenStream>;
+}
+
 pub trait ToBytesOffset {
-    fn bytes_offset(&self) -> TokenStream;
+    fn prev_bytes(&self) -> Either<usize, TokenStream>;
+
+    fn next_bytes(&self) -> Either<usize, TokenStream>;
+
+    fn prev_bytes_offset(&self) -> TokenStream {
+        self.prev_bytes()
+            .either(|offset| quote! { #offset }, |offset| offset)
+    }
+
+    fn next_bytes_offset(&self) -> TokenStream {
+        self.next_bytes()
+            .either(|offset| quote! { #offset }, |offset| offset)
+    }
+}
+
+impl ToBitsOffset for usize {
+    fn bits_offset(&self) -> Either<usize, TokenStream> {
+        Either::Left(*self)
+    }
 }
 
 impl ToBytesOffset for usize {
-    fn bytes_offset(&self) -> TokenStream {
-        let offset = (*self + 7) / 8;
+    fn prev_bytes(&self) -> Either<usize, TokenStream> {
+        Either::Left(self / 8)
+    }
 
-        quote! { #offset }
+    fn next_bytes(&self) -> Either<usize, TokenStream> {
+        Either::Left((*self + 7) / 8)
+    }
+}
+
+impl<'a> ToBitsOffset for &'a [Length] {
+    fn bits_offset(&self) -> Either<usize, TokenStream> {
+        let mut offsets = reduce_offsets(self.iter());
+
+        match (offsets.next(), offsets.next()) {
+            (Some(Length::Bits(bits)), None) => Either::Left(bits),
+            (Some(Length::Bits(bits)), offset) => Either::Right(quote! {
+                #bits + (#offset #( + #offsets )*) * 8
+            }),
+            _ => Either::Left(0),
+        }
     }
 }
 
 impl<'a> ToBytesOffset for &'a [Length] {
-    fn bytes_offset(&self) -> TokenStream {
+    fn prev_bytes(&self) -> Either<usize, TokenStream> {
         let mut offsets = reduce_offsets(self.iter());
 
-        if let Some(Length::Bits(bits)) = offsets.next() {
-            let offset = (bits + 7) / 8;
+        match (offsets.next(), offsets.next()) {
+            (Some(Length::Bits(bits)), None) => Either::Left(bits / 8),
+            (Some(Length::Bits(bits)), offset) => {
+                let off = bits / 8;
 
-            return quote! { #offset #( + #offsets )* };
-        } else {
-            quote! { (( #(#offsets)+* ) + 7) / 8 }
+                Either::Right(quote! {
+                    #off + #offset #( + #offsets )*
+                })
+            }
+            _ => Either::Left(0),
+        }
+    }
+
+    fn next_bytes(&self) -> Either<usize, TokenStream> {
+        let mut offsets = reduce_offsets(self.iter());
+
+        match (offsets.next(), offsets.next()) {
+            (Some(Length::Bits(bits)), None) => Either::Left(bits / 8),
+            (Some(Length::Bits(bits)), Some(offset)) => {
+                let off = (bits + 7) / 8;
+
+                Either::Right(quote! {
+                    #off + #offset #( + #offsets )*
+                })
+            }
+            _ => Either::Left(0),
         }
     }
 }
@@ -102,18 +161,18 @@ fn reduce_offsets<'a, I: IntoIterator<Item = &'a Length>>(lens: I) -> impl Itera
             } else {
                 lens.push(len.clone());
 
-                (lens, align_to::<u8>(total_bits), true)
+                (lens, align_offset::<u8>(total_bits), true)
             }
         },
     );
 
-    let total_len = Length::Bits(align_to::<u8>(total_bits));
+    let total_len = Length::Bits(total_bits);
 
     once(total_len).chain(length_funcs.into_iter())
 }
 
-fn align_to<T>(bits: usize) -> usize {
-    let align = mem::size_of::<T>() * 8;
+pub fn align_offset<T>(bits: usize) -> usize {
+    let align = mem::align_of::<T>() * 8;
 
     ((bits + align - 1) / align) * align
 }
@@ -170,9 +229,13 @@ mod tests {
 
     #[test]
     fn test_bytes_offset() {
-        assert_eq!(12usize.bytes_offset().to_string(), "2usize");
-        assert_eq!(16usize.bytes_offset().to_string(), "2usize");
-        assert_eq!(18usize.bytes_offset().to_string(), "3usize");
+        assert_eq!(12usize.prev_bytes_offset().to_string(), "1usize");
+        assert_eq!(16usize.prev_bytes_offset().to_string(), "2usize");
+        assert_eq!(18usize.prev_bytes_offset().to_string(), "2usize");
+
+        assert_eq!(12usize.next_bytes_offset().to_string(), "2usize");
+        assert_eq!(16usize.next_bytes_offset().to_string(), "2usize");
+        assert_eq!(18usize.next_bytes_offset().to_string(), "3usize");
 
         let funcs = &[
             Length::Bits(1),
@@ -181,11 +244,17 @@ mod tests {
             Length::Bits(4),
             Length::Func(ident!("foo")),
             Length::Bits(8),
+            Length::Bits(3),
         ][..];
 
         assert_eq!(
-            funcs.bytes_offset().to_string(),
+            funcs.prev_bytes_offset().to_string(),
             "3usize + ( 1 + 2 * 3 ) + foo ( & self . to_immutable ( ) )"
+        );
+
+        assert_eq!(
+            funcs.next_bytes_offset().to_string(),
+            "4usize + ( 1 + 2 * 3 ) + foo ( & self . to_immutable ( ) )"
         );
     }
 

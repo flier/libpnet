@@ -9,7 +9,7 @@ use syn;
 
 use field::{Field, FieldKind, ItemKind};
 use packet::Packet;
-use types::{parse_primitive, Endianness, Length, ToBytesOffset};
+use types::{parse_primitive, Endianness, Length, ToBitsOffset, ToBytesOffset};
 
 macro_rules! ident {
     ($name:expr) => {
@@ -353,7 +353,7 @@ struct MinimumPacketSize<'a> {
 
 impl<'a> Generator for MinimumPacketSize<'a> {
     fn tokens(&self) -> TokenStream {
-        let packet_size = self.packet_size.bytes_offset();
+        let packet_size = self.packet_size.next_bytes_offset();
 
         quote! {
             /// The minimum size (in bytes) a packet of this type can be.
@@ -378,7 +378,7 @@ impl<'a> Generator for PacketSize<'a> {
             "The size (in bytes) of a {} instance when converted into a byte-array",
             base_name
         );
-        let packet_size = self.packet_size.bytes_offset();
+        let packet_size = self.packet_size.next_bytes_offset();
 
         quote! {
             #[doc = #comment]
@@ -448,13 +448,13 @@ impl<'a> Generator for ImplPacketTrait<'a> {
 
         let (start_offset, end_offset) = self.payload_bounds.as_ref().either(
             |Range { start, end }| {
-                let start_offset = start.as_slice().bytes_offset();
-                let end_offset = end.as_slice().bytes_offset();
+                let start_offset = start.as_slice().next_bytes_offset();
+                let end_offset = end.as_slice().next_bytes_offset();
 
                 (start_offset, Some(end_offset))
             },
             |RangeFrom { start }| {
-                let start_offset = start.as_slice().bytes_offset();
+                let start_offset = start.as_slice().next_bytes_offset();
 
                 (start_offset, None)
             },
@@ -516,7 +516,7 @@ struct ImplPacketSizeTrait<'a> {
 impl<'a> Generator for ImplPacketSizeTrait<'a> {
     fn tokens(&self) -> TokenStream {
         let packet_name = self.packet_name;
-        let packet_size = self.packet_size.bytes_offset();
+        let packet_size = self.packet_size.next_bytes_offset();
 
         quote! {
             impl<'a> ::pnet_macros_support::packet::PacketSize for #packet_name<'a> {
@@ -788,7 +788,7 @@ impl<'a> Deref for RawVecFieldAccessor<'a> {
 impl<'a> Generator for RawVecFieldAccessor<'a> {
     fn tokens(&self) -> TokenStream {
         let field_name = &self.ident;
-        let current_offset = self.length_funcs.bytes_offset();
+        let current_offset = self.length_funcs.next_bytes_offset();
         let packet_length = self.packet_length;
 
         let get_field_raw = {
@@ -871,7 +871,7 @@ impl<'a> Generator for PrimitiveVecFieldAccessor<'a> {
             field_name
         );
         let get_field = ident!("get_{}", field_name);
-        let current_offset = self.length_funcs.bytes_offset();
+        let current_offset = self.length_funcs.next_bytes_offset();
         let item_ty = &self.item_ty;
 
         let data = if let Some(packet_length) = self.packet_length {
@@ -936,7 +936,7 @@ impl<'a> Generator for CustomVecFieldAccessor<'a> {
         let field_name = &self.ident;
         let item_ty = self.item_ty;
         let item_iter_ty = ident!("{}Iterable", item_ty);
-        let current_offset = self.length_funcs.bytes_offset();
+        let current_offset = self.length_funcs.next_bytes_offset();
         let packet_length = self.packet_length;
         let get_field = ident!("get_{}", field_name);
         let get_field_iter = ident!("get_{}_iter", field_name);
@@ -1010,10 +1010,10 @@ impl<'a> Generator for CustomFieldAccessor<'a> {
         let get_field = ident!("get_{}", field_name);
 
         let ctor = if self.arg_types.is_empty() {
-            let bytes_offset = self.length_funcs.bytes_offset();
+            let next_bytes_offset = self.length_funcs.next_bytes_offset();
 
             quote! {
-                #field_ty ::new(&self.packet[#bytes_offset ..])
+                #field_ty ::new(&self.packet[#next_bytes_offset ..])
             }
         } else {
             let mut args = vec![];
@@ -1167,7 +1167,7 @@ impl<'a> Generator for VecFieldMutator<'a> {
         );
         let set_field = ident!("set_{}", field_name);
         let item_ty = self.item_ty;
-        let current_offset = self.length_funcs.bytes_offset();
+        let current_offset = self.length_funcs.next_bytes_offset();
         let data = if let Some(packet_length) = self.packet_length {
             quote! {
                 let packet_length = #packet_length;
@@ -1265,10 +1265,10 @@ impl<'a> Generator for CustomFieldMutator<'a> {
         let set_field = ident!("set_{}", field_name);
 
         let setter = if self.arg_types.is_empty() {
-            let bytes_offset = self.length_funcs.bytes_offset();
+            let next_bytes_offset = self.length_funcs.next_bytes_offset();
 
             quote_spanned! { self.span() =>
-                self.packet[#bytes_offset .. #bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
+                self.packet[#next_bytes_offset .. #next_bytes_offset + ::std::mem::size_of_val(vals)].copy_from_slice(&vals[..]);
             }
         } else {
             let mut set_args = vec![];
@@ -1312,47 +1312,83 @@ impl<'a> Generator for CustomFieldMutator<'a> {
     }
 }
 
-pub fn read_operations<O: ToBytesOffset, T: ToTokens>(
+impl Generator for Option<Endianness> {
+    fn tokens(&self) -> TokenStream {
+        let name = ident!(match self {
+            Some(Endianness::Little) => "LittleEndian",
+            Some(Endianness::Big) => "BigEndian",
+            None => "NativeEndian",
+        });
+
+        quote! { <::byteorder:: #name as ::byteorder::ByteOrder> }
+    }
+}
+
+pub fn read_operations<O: ToBitsOffset, T: ToTokens>(
     offset: O,
     bits: usize,
     endianness: Option<Endianness>,
     packet: T,
 ) -> TokenStream {
-    if bits % 8 == 0 && bits <= 64 {
-        let bytes_offset = offset.bytes_offset();
-        let endianness_name = syn::Ident::new(
-            match endianness {
-                Some(Endianness::Little) => "LittenEndia",
-                Some(Endianness::Big) => "BigEndian",
-                None => "NativeEndian",
-            },
-            Span::call_site(),
-        );
+    if bits == 0 {
+        quote! { unsafe { ::std::mem::zeroed() } }
+    } else if bits <= 64 {
+        let endianness = endianness.tokens();
 
-        match bits {
-            8 => quote! {
-                #packet[#bytes_offset]
-            },
-            16 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u16(&#packet[#bytes_offset..])
-            },
-            24 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u24(&#packet[#bytes_offset..])
-            },
-            32 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u32(&#packet[#bytes_offset..])
-            },
-            48 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u48(&#packet[#bytes_offset..])
-            },
-            64 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_u64(&#packet[#bytes_offset..])
-            },
-            _ => {
-                let bytes = (bits + 7) / 8;
+        match offset.bits_offset() {
+            Either::Left(bits_offset) => {
+                let bytes_offset = bits_offset / 8;
+                let bytes_len = (bits_offset % 8 + bits + 7) / 8;
 
-                quote!{
-                    <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::read_uint(&#packet[#bytes_offset..], #bytes)
+                let read_op = match bytes_len {
+                    1 => quote! { #packet[#bytes_offset] },
+                    2 => quote! { #endianness::read_u16(&#packet[#bytes_offset..]) },
+                    3 => quote! { #endianness::read_u24(&#packet[#bytes_offset..]) },
+                    4 => quote! { #endianness::read_u32(&#packet[#bytes_offset..]) },
+                    6 => quote! { #endianness::read_u48(&#packet[#bytes_offset..]) },
+                    8 => quote! { #endianness::read_u64(&#packet[#bytes_offset..]) },
+                    _ => quote! { #endianness::read_uint(&#packet[#bytes_offset..], #bytes_len) },
+                };
+
+                if bits_offset % 8 == 0 && bits % 8 == 0 {
+                    read_op
+                } else {
+                    let mask: u64 = (1 << bits) - 1;
+                    let rshift = bytes_len * 8 - bits_offset % 8 - bits;
+
+                    if rshift == 0 {
+                        quote! {
+                            let value = #read_op as u64;
+
+                            value & #mask
+                        }
+                    } else {
+                        quote! {
+                            let value = #read_op as u64;
+
+                            value >> #rshift & #mask
+                        }
+                    }
+                }
+            }
+            Either::Right(offset) => {
+                let mask = 1u64
+                    .checked_shl(bits as u32)
+                    .map(|n| {
+                        let mask = n - 1;
+
+                        quote! { value >> rshift & #mask }
+                    })
+                    .unwrap_or_else(|| quote! { value >> rshift });
+
+                quote ! {
+                    let bits_offset = #offset;
+                    let bytes_offset = bits_offset / 8;
+                    let bytes_len = (bits_offset % 8 + #bits + 7) / 8;
+                    let value = #endianness::read_uint(&#packet[bytes_offset..], bytes_len);
+                    let rshift = bytes_len * 8 - bits_offset % 8 - #bits;
+
+                    #mask
                 }
             }
         }
@@ -1361,48 +1397,92 @@ pub fn read_operations<O: ToBytesOffset, T: ToTokens>(
     }
 }
 
-pub fn write_operations<O: ToBytesOffset, T: ToTokens, V: ToTokens>(
+pub fn write_operations<O: ToBitsOffset, T: ToTokens, V: ToTokens>(
     offset: O,
     bits: usize,
     endianness: Option<Endianness>,
     packet: T,
     val: V,
 ) -> TokenStream {
-    if bits % 8 == 0 && bits <= 64 {
-        let bytes_offset = offset.bytes_offset();
-        let endianness_name = syn::Ident::new(
-            match endianness {
-                Some(Endianness::Little) => "LittenEndian",
-                Some(Endianness::Big) => "BigEndian",
-                None => "NativeEndian",
-            },
-            Span::call_site(),
-        );
+    if bits == 0 {
+        quote!{}
+    } else if bits <= 64 {
+        let endianness = endianness.tokens();
 
-        match bits {
-            8 => quote! {
-                #packet[#bytes_offset] = #val;
-            },
-            16 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u16(&mut #packet[#bytes_offset..], #val);
-            },
-            24 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u24(&mut #packet[#bytes_offset..], #val);
-            },
-            32 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u32(&mut #packet[#bytes_offset..], #val);
-            },
-            48 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u48(&mut #packet[#bytes_offset..], #val);
-            },
-            64 => quote! {
-                <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_u64(&mut #packet[#bytes_offset..], #val);
-            },
-            _ => {
-                let bytes = bits / 8;
+        match offset.bits_offset() {
+            Either::Left(bits_offset) => {
+                let bytes_offset = bits_offset / 8;
+                let bytes_len = (bits_offset % 8 + bits + 7) / 8;
 
+                if bits_offset % 8 == 0 && bits % 8 == 0 {
+                    match bytes_len {
+                        1 => quote! { #packet[#bytes_offset] = #val; },
+                        2 => quote! { #endianness::write_u16(&mut #packet[#bytes_offset..], #val); },
+                        3 => quote! { #endianness::write_u24(&mut #packet[#bytes_offset..], #val); },
+                        4 => quote! { #endianness::write_u32(&mut #packet[#bytes_offset..], #val); },
+                        6 => quote! { #endianness::write_u48(&mut #packet[#bytes_offset..], #val); },
+                        8 => quote! { #endianness::write_u64(&mut #packet[#bytes_offset..], #val); },
+                        _ => quote! { #endianness::write_uint(&mut #packet[#bytes_offset..], #bytes_len, #val); },
+                    }
+                } else {
+                    let total_bits = bytes_len * 8;
+                    let head_bits = bits_offset % 8;
+                    let head_shift = total_bits - head_bits;
+                    let head_mask = 1u64
+                        .checked_shl(head_bits as u32)
+                        .and_then(|n| (n - 1).checked_shl(head_shift as u32))
+                        .unwrap_or(0);
+                    let value_shift = total_bits - head_bits - bits;
+                    let val = 1u64.checked_shl(bits as u32).map(|n| n - 1).map_or_else(
+                        || quote! { #val as u64 },
+                        |mask| quote! { (#val as u64 & #mask) },
+                    );
+                    let tail_mask = 1u64.checked_shl(value_shift as u32).map_or(0, |n| n - 1);
+                    let mask = head_mask | tail_mask;
+                    let read_op = quote! {
+                        #endianness::read_uint(&#packet[#bytes_offset..], #bytes_len)
+                    };
+                    let val = if value_shift > 0 {
+                        quote!{ (#val << #value_shift) }
+                    } else {
+                        quote!{ #val }
+                    };
+                    let write_op = quote! {
+                        #endianness::write_uint(&mut #packet[#bytes_offset..], #bytes_len, new);
+                    };
+                    quote! {
+                        let old = #read_op;
+                        let new = (old & #mask) | #val;
+                        #write_op
+                    }
+                }
+            }
+            Either::Right(offset) => {
                 quote!{
-                    <::byteorder:: #endianness_name as ::byteorder::ByteOrder>::write_uint(&mut #packet[#bytes_offset..], #bytes, #val);
+                    let bits_offset = #offset;
+                    let bytes_offset = bits_offset / 8;
+                    let bytes_len = (bits_offset % 8 + #bits + 7) / 8;
+                    let total_bits = bytes_len * 8;
+                    let head_bits = bits_offset % 8;
+                    let head_shift = total_bits - head_bits;
+                    let head_mask = 1u64
+                        .checked_shl(head_bits as u32)
+                        .map(|n| n - 1)
+                        .and_then(|mask| mask.checked_shl(head_shift as u32))
+                        .unwrap_or(0);
+                    let value_shift = total_bits - head_bits - bits;
+                    let val = 1u64
+                        .checked_shl(bits as u32)
+                        .map(|n| n - 1)
+                        .map_or_else(
+                            || val as u64,
+                            |mask| val as u64 & mask
+                        );
+                    let tail_mask = 1u64.checked_shl(value_shift as u32).map_or(0, |n| n - 1);
+                    let mask = head_mask | tail_mask;
+                    let old = #endianness::read_uint(&#packet[bytes_offset..], bytes_len);
+                    let new = (old & mask) | val;
+                    endianness::write_uint(&mut #packet[bytes_offset..], bytes_len, new);
                 }
             }
         }
@@ -3295,18 +3375,131 @@ mod tests {
     #[test]
     fn test_read_operations() {
         let read_ops = [
-            (0, 8, Some(Endianness::Little), quote! { packet[0usize] }),
-            (8, 16, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&packet[1usize..]) }),
-            (16, 24, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u24(&packet[2usize..]) }),
-            (24, 32, Some(Endianness::Little), quote! { <::byteorder::LittenEndia as ::byteorder::ByteOrder>::read_u32(&packet[3usize..]) }),
-            (32, 48, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u48(&packet[4usize..]) }),
-            (40, 64, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u64(&packet[5usize..]) }),
-            (48, 40, Some(Endianness::Little), quote! { <::byteorder::LittenEndia as ::byteorder::ByteOrder>::read_uint(&packet[6usize..], 5usize) }),
+            (
+                &[Length::Bits(0)][..],
+                0,
+                None,
+                quote! { unsafe { ::std::mem::zeroed() } },
+            ),
+            (
+                &[Length::Bits(0)][..],
+                8,
+                Some(Endianness::Little),
+                quote! { packet[0usize] },
+            ),
+            (
+                &[Length::Bits(8)][..],
+                16,
+                Some(Endianness::Big),
+                quote! {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&packet[1usize..])
+                },
+            ),
+            (
+                &[Length::Bits(16)][..],
+                24,
+                None,
+                quote! {
+                    <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u24(&packet[2usize..])
+                },
+            ),
+            (
+                &[Length::Bits(24)][..],
+                32,
+                Some(Endianness::Little),
+                quote! {
+                    <::byteorder::LittleEndian as ::byteorder::ByteOrder>::read_u32(&packet[3usize..])
+                },
+            ),
+            (
+                &[Length::Bits(32)][..],
+                48,
+                Some(Endianness::Big),
+                quote! {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u48(&packet[4usize..])
+                },
+            ),
+            (
+                &[Length::Bits(40)][..],
+                64,
+                None,
+                quote! {
+                    <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_u64(&packet[5usize..])
+                },
+            ),
+            (
+                &[Length::Bits(48)],
+                40,
+                Some(Endianness::Little),
+                quote! {
+                    <::byteorder::LittleEndian as ::byteorder::ByteOrder>::read_uint(&packet[6usize..], 5usize)
+                },
+            ),
+            (
+                &[Length::Bits(0)][..],
+                3,
+                None,
+                quote! {
+                    let value = packet[0usize] as u64;
+
+                    value >> 5usize & 7u64
+                },
+            ),
+            (
+                &[Length::Bits(3)][..],
+                5,
+                None,
+                quote! {
+                    let value = packet[0usize] as u64;
+
+                    value & 31u64
+                },
+            ),
+            (
+                &[Length::Bits(4)][..],
+                8,
+                Some(Endianness::Big),
+                quote! {
+                    let value = <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_u16(&packet[0usize..]) as u64;
+
+                    value >> 4usize & 255u64
+                },
+            ),
+            (
+                &[Length::Bits(5)][..],
+                31,
+                Some(Endianness::Little),
+                quote! {
+                    let value = <::byteorder::LittleEndian as ::byteorder::ByteOrder>::read_uint(&packet[0usize..], 5usize) as u64;
+
+                    value >> 4usize & 2147483647u64
+                },
+            ),
+            (
+                &[
+                    Length::Bits(5),
+                    Length::Func(ident!("ipv4_options_length")),
+                    Length::Bits(4),
+                ][..],
+                31,
+                Some(Endianness::Little),
+                quote! {
+                    let bits_offset = 12usize + (ipv4_options_length(&self.to_immutable())) * 8;
+                    let bytes_offset = bits_offset / 8;
+                    let bytes_len = (bits_offset % 8 + 31usize + 7) / 8;
+                    let value = <::byteorder::LittleEndian as ::byteorder::ByteOrder>::read_uint(
+                        &packet[bytes_offset..],
+                        bytes_len
+                    );
+                    let rshift = bytes_len * 8 - bits_offset % 8 - 31usize;
+                    value >> rshift & 2147483647u64
+                },
+            ),
         ];
 
-        for &(bits_offset, bits, endianness, ref code) in &read_ops {
+        for &(offset, bits, endianness, ref code) in &read_ops {
             assert_eq!(
-                read_operations(bits_offset, bits, endianness, quote! { packet }).to_string(),
+                read_operations(offset, bits, endianness, quote! { packet }).to_string(),
                 code.to_string()
             );
         }
@@ -3315,24 +3508,162 @@ mod tests {
     #[test]
     fn test_write_operations() {
         let write_ops = [
-            (0, 8, Some(Endianness::Little), quote! { packet[0usize] = val; }),
-            (8, 16, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut packet[1usize..], val); }),
-            (16, 24, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u24(&mut packet[2usize..], val); }),
-            (24, 32, Some(Endianness::Little), quote! { <::byteorder::LittenEndian as ::byteorder::ByteOrder>::write_u32(&mut packet[3usize..], val); }),
-            (32, 48, Some(Endianness::Big), quote! { <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u48(&mut packet[4usize..], val); }),
-            (40, 64, None, quote! { <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u64(&mut packet[5usize..], val); }),
-            (48, 40, Some(Endianness::Little), quote! { <::byteorder::LittenEndian as ::byteorder::ByteOrder>::write_uint(&mut packet[6usize..], 5usize, val); }),
+            (
+                &[Length::Bits(0)][..],
+                8,
+                Some(Endianness::Little),
+                quote! { packet[0usize] = val; },
+            ),
+            (
+                &[Length::Bits(8)][..],
+                16,
+                Some(Endianness::Big),
+                quote! {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u16(&mut packet[1usize..], val);
+                },
+            ),
+            (
+                &[Length::Bits(16)][..],
+                24,
+                None,
+                quote! {
+                    <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u24(&mut packet[2usize..], val);
+                },
+            ),
+            (
+                &[Length::Bits(24)][..],
+                32,
+                Some(Endianness::Little),
+                quote! {
+                    <::byteorder::LittleEndian as ::byteorder::ByteOrder>::write_u32(&mut packet[3usize..], val);
+                },
+            ),
+            (
+                &[Length::Bits(32)][..],
+                48,
+                Some(Endianness::Big),
+                quote! {
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_u48(&mut packet[4usize..], val);
+                },
+            ),
+            (
+                &[Length::Bits(40)][..],
+                64,
+                None,
+                quote! {
+                    <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_u64(&mut packet[5usize..], val);
+                },
+            ),
+            (
+                &[Length::Bits(48)][..],
+                40,
+                Some(Endianness::Little),
+                quote! {
+                    <::byteorder::LittleEndian as ::byteorder::ByteOrder>::write_uint(&mut packet[6usize..], 5usize, val);
+                },
+            ),
+            (
+                &[Length::Bits(0)][..],
+                3,
+                None,
+                quote! {
+                    let old = <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_uint(&packet[0usize..], 1usize);
+                    let new = (old & 31u64) | ((val as u64 & 7u64) << 5usize);
+                    <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_uint(&mut packet[0usize..], 1usize, new);
+                },
+            ),
+            (
+                &[Length::Bits(3)][..],
+                5,
+                None,
+                quote! {
+                    let old = <::byteorder::NativeEndian as ::byteorder::ByteOrder>::read_uint(
+                        &packet[0usize..],
+                        1usize
+                    );
+                    let new = (old & 224u64) | (val as u64 & 31u64);
+                    <::byteorder::NativeEndian as ::byteorder::ByteOrder>::write_uint(
+                        &mut packet[0usize..],
+                        1usize,
+                        new
+                    );
+                },
+            ),
+            (
+                &[Length::Bits(4)][..],
+                8,
+                Some(Endianness::Big),
+                quote! {
+                    let old = <::byteorder::BigEndian as ::byteorder::ByteOrder>::read_uint(
+                        &packet[0usize..],
+                        2usize
+                    );
+                    let new = (old & 61455u64) | ((val as u64 & 255u64) << 4usize);
+                    <::byteorder::BigEndian as ::byteorder::ByteOrder>::write_uint(
+                        &mut packet[0usize..],
+                        2usize,
+                        new
+                    );
+                },
+            ),
+            (
+                &[Length::Bits(15)][..],
+                31,
+                Some(Endianness::Little),
+                quote! {
+                    let old = <::byteorder::LittleEndian as ::byteorder::ByteOrder>::read_uint(
+                        &packet[1usize..],
+                        5usize
+                    );
+                    let new = (old & 1090921693187u64) | ((val as u64 & 2147483647u64) << 2usize);
+                    <::byteorder::LittleEndian as ::byteorder::ByteOrder>::write_uint(
+                        &mut packet[1usize..],
+                        5usize,
+                        new
+                    );
+                },
+            ),
+            (
+                &[
+                    Length::Bits(5),
+                    Length::Func(ident!("ipv4_options_length")),
+                    Length::Bits(4),
+                ][..],
+                31,
+                Some(Endianness::Little),
+                quote! {
+                    let bits_offset = 12usize + (ipv4_options_length(&self.to_immutable())) * 8;
+                    let bytes_offset = bits_offset / 8;
+                    let bytes_len = (bits_offset % 8 + 31usize + 7) / 8;
+                    let total_bits = bytes_len * 8;
+                    let head_bits = bits_offset % 8;
+                    let head_shift = total_bits - head_bits;
+                    let head_mask = 1u64
+                        .checked_shl(head_bits as u32)
+                        .map(|n| n - 1)
+                        .and_then(|mask| mask.checked_shl(head_shift as u32))
+                        .unwrap_or(0);
+                    let value_shift = total_bits - head_bits - bits;
+                    let val = 1u64
+                        .checked_shl(bits as u32)
+                        .map(|n| n - 1)
+                        .map_or_else(|| val as u64, |mask| val as u64 & mask);
+                    let tail_mask = 1u64.checked_shl(value_shift as u32).map_or(0, |n| n - 1);
+                    let mask = head_mask | tail_mask;
+                    let old = <::byteorder::LittleEndian as ::byteorder::ByteOrder>::read_uint(
+                        &packet[bytes_offset..],
+                        bytes_len
+                    );
+                    let new = (old & mask) | val;
+                    endianness::write_uint(&mut packet[bytes_offset..], bytes_len, new);
+                },
+            ),
         ];
 
-        for &(bits_offset, bits, endianness, ref code) in &write_ops {
+        for &(offset, bits, endianness, ref code) in &write_ops {
             assert_eq!(
-                write_operations(
-                    bits_offset,
-                    bits,
-                    endianness,
-                    quote! { packet },
-                    quote! { val }
-                ).to_string(),
+                write_operations(offset, bits, endianness, quote! { packet }, quote! { val })
+                    .to_string(),
                 code.to_string()
             );
         }
